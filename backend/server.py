@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Any
 import datetime
 from contextlib import contextmanager
 import logging
+from sqlalchemy import inspect
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
@@ -90,92 +91,127 @@ class BaseDBModel:
         db.commit()
         return True
 
-# Модель данных телеметрии
-class Data(Base, BaseDBModel):
-    __tablename__ = "value"
-    
-    id = Column(Integer, primary_key=True)
-    Время = Column(DateTime, index=True)
-    Мощность_МПСИ = Column(Float)
-    Мощность_МШЦ = Column(Float)
-    Ток_МПСИ = Column(Float)
-    Ток_МШЦ = Column(Float)
-    Питание_МПСИ = Column(Float)
-    Возврат_руды_МПСИ = Column(Float)
-    Расход_воды_МПСИ_PV = Column(Float)
-    Расход_воды_МПСИ_SP = Column(Float)
-    Расход_воды_МПСИ_CV = Column(Float)
-    факт_соотношение_руда_вода_МПСИ = Column(Float)
-    Давление_на_подшипник_МПСИ_загрузка = Column(Float)
-    Давление_на_подшипник_МПСИ_разгрузка = Column(Float)
-    Расход_оборотной_воды = Column(Float)
-    pH_оборотной_воды = Column(Float)
-    t_оборотной_воды = Column(Float)
-    Гранулометрия = Column(Float)
-    Поток = Column(Float)
+# Кеш для хранения созданных моделей
+_model_cache = {}
 
-    def __repr__(self):
-        return f'''(
-            id: {self.id},
-            Время: {self.Время},
-            Мощность_МПСИ: {self.Мощность_МПСИ},
-            Мощность_МШЦ: {self.Мощность_МШЦ},
-            Ток_МПСИ: {self.Ток_МПСИ},
-            Ток_МШЦ: {self.Ток_МШЦ},
-            Питание_МПСИ: {self.Питание_МПСИ},
-            Возврат_руды_МПСИ: {self.Возврат_руды_МПСИ},
-            Расход_воды_МПСИ_PV: {self.Расход_воды_МПСИ_PV},
-            Расход_воды_МПСИ_SP: {self.Расход_воды_МПСИ_SP},
-            Расход_воды_МПСИ_CV: {self.Расход_воды_МПСИ_CV},
-            факт_соотношение_руда_вода_МПСИ: {self.факт_соотношение_руда_вода_МПСИ},
-            Давление_на_подшипник_МПСИ_загрузка: {self.Давление_на_подшипник_МПСИ_загрузка},
-            Давление_на_подшипник_МПСИ_разгрузка: {self.Давление_на_подшипник_МПСИ_разгрузка},
-            Расход_оборотной_воды: {self.Расход_оборотной_воды},
-            pH_оборотной_воды: {self.pH_оборотной_воды},
-            t_оборотной_воды: {self.t_оборотной_воды},
-            Гранулометрия: {self.Гранулометрия},
-            Поток: {self.Поток}
-        )'''
+# Фабрика моделей
+def create_data_model(table_name):
+    # Если модель уже создана - возвращаем её из кеша
+    if table_name in _model_cache:
+        return _model_cache[table_name]
     
-    def __str__(self):
-       return f'''(
-            {self.id},
-            {self.Время},
-            {self.Гранулометрия},
-            {self.Поток}
-        )'''
+    class Data(Base, BaseDBModel):
+        __tablename__ = table_name
+        # Добавляем extend_existing=True, чтобы разрешить повторное использование таблицы
+        __table_args__ = {'extend_existing': True}
+        
+        id = Column(Integer, primary_key=True)
+        Время = Column(DateTime, index=True)
+        Мощность_МПСИ = Column(Float)
+        Мощность_МШЦ = Column(Float)
+        Ток_МПСИ = Column(Float)
+        Ток_МШЦ = Column(Float)
+        Питание_МПСИ = Column(Float)
+        Возврат_руды_МПСИ = Column(Float)
+        Расход_воды_МПСИ_PV = Column(Float)
+        Расход_воды_МПСИ_SP = Column(Float)
+        Расход_воды_МПСИ_CV = Column(Float)
+        факт_соотношение_руда_вода_МПСИ = Column(Float)
+        Давление_на_подшипник_МПСИ_загрузка = Column(Float)
+        Давление_на_подшипник_МПСИ_разгрузка = Column(Float)
+        Расход_оборотной_воды = Column(Float)
+        pH_оборотной_воды = Column(Float)
+        t_оборотной_воды = Column(Float)
+        Гранулометрия = Column(Float)
+        Поток = Column(Float)
+
+        def __repr__(self):
+            return f'''(
+                id: {self.id},
+                Время: {self.Время},
+                Мощность_МПСИ: {self.Мощность_МПСИ},
+                Мощность_МШЦ: {self.Мощность_МШЦ},
+                Ток_МПСИ: {self.Ток_МПСИ},
+                Ток_МШЦ: {self.Ток_МШЦ},
+                Питание_МПСИ: {self.Питание_МПСИ},
+                Возврат_руды_МПСИ: {self.Возврат_руды_МПСИ},
+                Расход_воды_МПСИ_PV: {self.Расход_воды_МПСИ_PV},
+                Расход_воды_МПСИ_SP: {self.Расход_воды_МПСИ_SP},
+                Расход_воды_МПСИ_CV: {self.Расход_воды_МПСИ_CV},
+                факт_соотношение_руда_вода_МПСИ: {self.факт_соотношение_руда_вода_МПСИ},
+                Давление_на_подшипник_МПСИ_загрузка: {self.Давление_на_подшипник_МПСИ_загрузка},
+                Давление_на_подшипник_МПСИ_разгрузка: {self.Давление_на_подшипник_МПСИ_разгрузка},
+                Расход_оборотной_воды: {self.Расход_оборотной_воды},
+                pH_оборотной_воды: {self.pH_оборотной_воды},
+                t_оборотной_воды: {self.t_оборотной_воды},
+                Гранулометрия: {self.Гранулометрия},
+                Поток: {self.Поток}
+            )'''
+        
+        def __str__(self):
+            return f'''(
+                    {self.id},
+                    {self.Время},
+                    {self.Гранулометрия},
+                    {self.Поток}
+                )'''
+        
+        @classmethod
+        def get_by_date(cls, db: Session, date: datetime.date, limit: int = 10):
+            return db.query(cls).filter(cls.Время.cast(Date) == date).limit(limit).all()
     
-    @classmethod
-    def get_by_date(cls, db: Session, date: datetime.date, limit: int = 10):
-        return db.query(cls).filter(cls.Время.cast(Date) == date).limit(limit).all()
+    # Сохраняем модель в кеш
+    _model_cache[table_name] = Data
+    return Data
+
+# Дополнительная функция для проверки и создания таблицы
+def ensure_table_exists(table_name):
+    # Получаем или создаем модель таблицы
+    DataModel = create_data_model(table_name)
+    
+    # Проверяем существование таблицы
+    inspector = inspect(engine)
+    if table_name not in inspector.get_table_names():
+        # Создаем таблицу, если она не существует
+        DataModel.__table__.create(engine)
+        logger.info(f"Динамически создана таблица: {table_name}")
+    
+    return DataModel
 
 # Сервис для работы с данными
 class DataService:
     @staticmethod
-    def add_from_json(db: Session, json_data: Dict[str, Any]) -> Data:
+    def add_from_json(db: Session, json_data: Dict[str, Any], table_name='value_1234'):
         try:
+            # Проверяем и создаем таблицу при необходимости
+            DataModel = ensure_table_exists(table_name)
+            
             data_dict = json_data
             processed_dict = {key.replace(' ', '_').replace('/', '_'): value for key, value in data_dict.items()}
-            data = Data(**processed_dict)
-            db.add(data)
+            
+            data_instance = DataModel(**processed_dict)
+            db.add(data_instance)
             db.commit()
-            db.refresh(data)
-            return data
+            db.refresh(data_instance)
+            return data_instance
         except Exception as e:
             db.rollback()
             logger.error(f"Ошибка при добавлении данных из JSON: {str(e)}")
             raise
 
     @staticmethod
-    def add_from_pandas(db: Session, df: pd.DataFrame) -> List[Data]:
+    def add_from_pandas(db: Session, df: pd.DataFrame, table_name='value_1234'):
         added_data = []
         try:
+            # Проверяем и создаем таблицу при необходимости
+            DataModel = ensure_table_exists(table_name)
+            
             for _, row in df.iterrows():
                 data_dict = row.to_dict()
                 processed_dict = {key.replace(' ', '_').replace('/', '_'): value for key, value in data_dict.items()}
-                data = Data(**processed_dict)
-                db.add(data)
-                added_data.append(data)
+                data_instance = DataModel(**processed_dict)
+                db.add(data_instance)
+                added_data.append(data_instance)
             db.commit()
             return added_data
         except Exception as e:
@@ -184,7 +220,7 @@ class DataService:
             raise
 
     @staticmethod
-    def to_response_dict(data: Data) -> Dict[str, Any]:
+    def to_response_dict(data) -> Dict[str, Any]:
         return {
             "id": data.id,
             "Время": str(data.Время),
@@ -208,8 +244,16 @@ class DataService:
         }
 
 # Инициализация базы данных
-def create_db():
+def create_db(table_names=None):
     try:
+        if table_names is None:
+            table_names = ['value']  # По умолчанию создаем только таблицу 'value'
+        
+        # Создаем динамические таблицы
+        for table_name in table_names:
+            create_data_model(table_name)
+            
+        # Создаем все таблицы в базе данных
         Base.metadata.create_all(bind=engine)
         logger.info("База данных успешно создана")
     except Exception as e:
@@ -295,15 +339,20 @@ def get_value(value: ValuesRequest, db: Session = Depends(get_db_session)):
 # Запуск приложения
 if __name__ == '__main__':
     # Создаем базу данных перед запуском приложения
-    create_db()
+    # Укажите все имена таблиц, которые вам понадобятся
+    create_db(['value'])
     
     # Загружаем данные только если таблица успешно создана
     try:
+        # Чтение первых 100 записей
         df = pd.read_parquet('data/data_after_analys.parquet').head(100)
         add_from_pandas(df)
+        
+        # Чтение последних 100 записей
         df = pd.read_parquet('data/data_after_analys.parquet').tail(100)
         add_from_pandas(df)
-        logger.info(f"Успешно загружено {len(df)} записей из parquet файла")
+        
+        logger.info(f"Успешно загружено записей из parquet файла")
     except Exception as e:
         logger.error(f"Ошибка при загрузке данных из parquet файла: {str(e)}")
     

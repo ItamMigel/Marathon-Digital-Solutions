@@ -1,7 +1,8 @@
-**_pycache__
-**_ipynb_checkpoints
-**_venv
-**_pytest
-**_pytest.py
-**_pytest.pyc
+**pycache__
+**ipynb_checkpoints
+**venv
+**pytest
+**pytest.py
+**pytest.pyc
 catboost_info
+.cu**
