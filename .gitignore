@@ -6,3 +6,5 @@
 **pytest.pyc
 catboost_info
 .cu**
+**.log
+**.db
