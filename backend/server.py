@@ -1,19 +1,24 @@
-from sqlalchemy import create_engine, Column, Integer, String, Date, Float, DateTime
-from sqlalchemy.orm import declarative_base, Session, sessionmaker
-from sqlalchemy.ext.declarative import declared_attr
-import pandas as pd
-from fastapi import FastAPI, Depends, HTTPException, status
-import uvicorn
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
 import datetime
-from contextlib import contextmanager
 import logging
-from sqlalchemy import inspect
+from contextlib import contextmanager
+from typing import List, Optional, Dict, Any
+
+# Для работы с данными
+import pandas as pd
+
+# SQLAlchemy
+from sqlalchemy import create_engine, Column, Integer, Date, Float, DateTime, inspect
+from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.orm import declarative_base, Session, sessionmaker
+
+# FastAPI
+from fastapi import FastAPI, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+import uvicorn
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("server")
 
 # Конфигурация приложения
 class Config:
@@ -28,8 +33,8 @@ app = FastAPI(
     title=Config.API_TITLE,
     description=Config.API_DESCRIPTION,
     version=Config.API_VERSION,
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 # Инициализация базы данных
@@ -95,15 +100,13 @@ class BaseDBModel:
 _model_cache = {}
 
 # Фабрика моделей
-def create_data_model(table_name):
+def create_data_model(area_name):
     # Если модель уже создана - возвращаем её из кеша
-    if table_name in _model_cache:
-        return _model_cache[table_name]
+    if area_name in _model_cache:
+        return _model_cache[area_name]
     
     class Data(Base, BaseDBModel):
-        __tablename__ = table_name
-        # Добавляем extend_existing=True, чтобы разрешить повторное использование таблицы
-        __table_args__ = {'extend_existing': True}
+        __tablename__ = area_name
         
         id = Column(Integer, primary_key=True)
         Время = Column(DateTime, index=True)
@@ -157,34 +160,49 @@ def create_data_model(table_name):
                 )'''
         
         @classmethod
-        def get_by_date(cls, db: Session, date: datetime.date, limit: int = 10):
-            return db.query(cls).filter(cls.Время.cast(Date) == date).limit(limit).all()
+        def get_by_date(cls, db: Session, date: datetime.datetime, limit: int = 10):
+            try:
+                result = db.query(cls).filter(cls.Время == date).limit(limit).all()
+                if not result:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Данные на дату {date} не найдены"
+                    )
+                return result
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Ошибка базы данных: {status.HTTP_404_NOT_FOUND}: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Данные на дату {date} не найдены"
+                )
     
     # Сохраняем модель в кеш
-    _model_cache[table_name] = Data
+    _model_cache[area_name] = Data
     return Data
 
 # Дополнительная функция для проверки и создания таблицы
-def ensure_table_exists(table_name):
+def ensure_table_exists(area_name):
     # Получаем или создаем модель таблицы
-    DataModel = create_data_model(table_name)
+    DataModel = create_data_model(area_name)
     
     # Проверяем существование таблицы
     inspector = inspect(engine)
-    if table_name not in inspector.get_table_names():
+    if area_name not in inspector.get_table_names():
         # Создаем таблицу, если она не существует
         DataModel.__table__.create(engine)
-        logger.info(f"Динамически создана таблица: {table_name}")
+        logger.info(f"Динамически создана таблица: {area_name}")
     
     return DataModel
 
 # Сервис для работы с данными
 class DataService:
     @staticmethod
-    def add_from_json(db: Session, json_data: Dict[str, Any], table_name='value_1234'):
+    def add_from_json(db: Session, json_data: Dict[str, Any], area_name='value_1234'):
         try:
             # Проверяем и создаем таблицу при необходимости
-            DataModel = ensure_table_exists(table_name)
+            DataModel = ensure_table_exists(area_name)
             
             data_dict = json_data
             processed_dict = {key.replace(' ', '_').replace('/', '_'): value for key, value in data_dict.items()}
@@ -200,11 +218,11 @@ class DataService:
             raise
 
     @staticmethod
-    def add_from_pandas(db: Session, df: pd.DataFrame, table_name='value_1234'):
+    def add_from_pandas(db: Session, df: pd.DataFrame, area_name='default'):
         added_data = []
         try:
             # Проверяем и создаем таблицу при необходимости
-            DataModel = ensure_table_exists(table_name)
+            DataModel = ensure_table_exists(area_name)
             
             for _, row in df.iterrows():
                 data_dict = row.to_dict()
@@ -244,14 +262,11 @@ class DataService:
         }
 
 # Инициализация базы данных
-def create_db(table_names=None):
+def create_db(area_names=[]):
     try:
-        if table_names is None:
-            table_names = ['value']  # По умолчанию создаем только таблицу 'value'
-        
         # Создаем динамические таблицы
-        for table_name in table_names:
-            create_data_model(table_name)
+        for area_name in area_names:
+            create_data_model(area_name)
             
         # Создаем все таблицы в базе данных
         Base.metadata.create_all(bind=engine)
@@ -264,12 +279,14 @@ def create_db(table_names=None):
 class ValuesRequest(BaseModel):
     date: datetime.datetime
     limit: int = Field(default=10, ge=1, le=100)
+    area_name: List[str] = Field(default=[], description="[] - поиск по всем участкам")
     
     class Config:
         schema_extra = {
             "example": {
                 "date": "2023-01-01T00:00:00",
-                "limit": 10
+                "limit": 10,
+                "area_name": []
             }
         }
 
@@ -295,13 +312,13 @@ class DataResponse(BaseModel):
     potok: Optional[float] = None
 
 # Функции для работы с данными
-def add_from_json(json_data):
+def add_from_json(json_data, area_name='default'):
     with get_db() as db:
-        return DataService.add_from_json(db, json_data)
+        return DataService.add_from_json(db, json_data, area_name=area_name)
 
-def add_from_pandas(df):
+def add_from_pandas(df, area_name='default'):
     with get_db() as db:
-        return DataService.add_from_pandas(db, df)
+        return DataService.add_from_pandas(db, df, area_name=area_name)
 
 # API эндпоинты
 @app.get('/', tags=["Статус"])
@@ -315,10 +332,16 @@ def read_root():
 @app.post('/value', response_model=List[DataResponse], tags=["Данные"])
 def get_value(value: ValuesRequest, db: Session = Depends(get_db_session)):
     try:
-        date_post = value.date.date()
+        date_post = value.date
         limit = value.limit
         
-        results = Data.get_by_date(db, date_post, limit)
+        results = []
+        if len(value.area_name):
+            for area_name in value.area_name:
+                results += create_data_model(area_name).get_by_date(db, date_post, limit)
+        else:
+            for area in _model_cache:
+                results += area.get_by_date(db, date_post, limit)
         
         if not results:
             raise HTTPException(
@@ -339,18 +362,17 @@ def get_value(value: ValuesRequest, db: Session = Depends(get_db_session)):
 # Запуск приложения
 if __name__ == '__main__':
     # Создаем базу данных перед запуском приложения
-    # Укажите все имена таблиц, которые вам понадобятся
-    create_db(['value'])
+    create_db()
     
     # Загружаем данные только если таблица успешно создана
     try:
         # Чтение первых 100 записей
         df = pd.read_parquet('data/data_after_analys.parquet').head(100)
-        add_from_pandas(df)
+        add_from_pandas(df, area_name='moscow_1_1')
         
         # Чтение последних 100 записей
         df = pd.read_parquet('data/data_after_analys.parquet').tail(100)
-        add_from_pandas(df)
+        add_from_pandas(df, area_name='moscow_1_2')
         
         logger.info(f"Успешно загружено записей из parquet файла")
     except Exception as e:
