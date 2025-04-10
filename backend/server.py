@@ -25,7 +25,7 @@ logger = logging.getLogger("server")
 
 # Конфигурация приложения
 class Config:
-    DATABASE_URL = "sqlite:///value.db"
+    DATABASE_URL = "sqlite:///../value.db"  # Match the path from main.py
     DEBUG = True
     API_VERSION = "1.0.0"
     API_TITLE = "Система телеметрии"
@@ -55,6 +55,33 @@ Base = declarative_base()
 # Создание движка базы данных
 engine = create_engine(Config.DATABASE_URL, echo=Config.DEBUG)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Логирование пути к базе данных
+import os
+db_path = Config.DATABASE_URL.replace('sqlite:///', '')
+logger.info(f"Using database at path: {db_path}")
+absolute_path = os.path.abspath(db_path)
+logger.info(f"Absolute path to database: {absolute_path}")
+if os.path.exists(absolute_path):
+    logger.info(f"Database file exists: {absolute_path}")
+else:
+    logger.warning(f"Database file NOT FOUND: {absolute_path}")
+    # Попытка найти базу данных в других возможных местах
+    possible_paths = [
+        'value.db',
+        '../value.db',
+        '../../value.db',
+        '../../../value.db',
+        os.path.join(os.getcwd(), 'value.db')
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            logger.info(f"Found database at: {path}")
+            # Обновляем URL базы данных
+            Config.DATABASE_URL = f"sqlite:///{path}"
+            engine = create_engine(Config.DATABASE_URL, echo=Config.DEBUG)
+            SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            break
 
 # Менеджер контекста для сессий БД
 @contextmanager
@@ -1004,6 +1031,11 @@ async def startup_event():
     logger.info("Application started, background tasks initialized")
 
 if __name__ == '__main__':
+    # Print the current working directory to help with debugging
+    import os
+    logger.info(f"Current working directory: {os.getcwd()}")
+    logger.info(f"Attempting to connect to database at: {os.path.abspath(Config.DATABASE_URL.replace('sqlite:///', ''))}")
+    
     create_db()
     
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=Config.DEBUG)
