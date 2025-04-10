@@ -6,5 +6,7 @@
 **pytest.pyc
 catboost_info
 .cu**
+project_index.md
 **.log
 **.db
+frontend/**
