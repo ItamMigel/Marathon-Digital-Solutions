@@ -9,3 +9,7 @@ catboost_info
 project_index.md
 **.log
 **.db
+
+**build/Release
+
+frontend/node_modules
