@@ -25,6 +25,10 @@ import uvicorn
 import requests
 import json
 
+
+# Нейронка
+from model.main import Model
+
 # --- Конфигурация и Логгирование ---
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
 logger = logging.getLogger("server")
@@ -334,7 +338,21 @@ def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
 
             data_dict = {k: v for k, v in row.to_dict().items()
                          if k in valid_columns and pd.notna(v)}
-
+                         
+            # Гранулометрия_процент - особый случай, добавляем даже если None
+            if 'Гранулометрия_процент' in valid_columns:
+                if 'Гранулометрия_процент' not in data_dict:
+                    # Если значение отсутствует, используем случайное значение вместо 0
+                    e = Model()
+                    random_val = e.get_granulometry()
+                    data_dict['Гранулометрия_процент'] = random_val
+                    print(f"DB ADD: Добавляем новую случайную гранулометрию в словарь: {random_val}")
+                else:
+                    # Явное преобразование к float для обеспечения правильного типа
+                    original = data_dict['Гранулометрия_процент']
+                    data_dict['Гранулометрия_процент'] = float(original)
+                    print(f"DB ADD: Гранулометрия уже в словаре: {original} -> {data_dict['Гранулометрия_процент']}")
+                
             if not data_dict or (len(data_dict) == 1 and 'Время' in data_dict):
                 logger.warning(f"Строка {index} для {area_name} не содержит валидных данных (кроме, возможно, времени), пропуск.")
                 skipped_count += 1
@@ -505,14 +523,23 @@ def get_lines_summary(db: Session = Depends(get_db_session)):
         try:
             df_new = read_new_csv_records(line.file_path, line.last_update)
             if df_new is not None:
+                logger.info(f"Добавляем столбец 'Гранулометрия_процент' для {line.area_name}")
+                e = Model()
+                random_values = []
+                for i in range(len(df_new)):
+                    random_val = e.get_granulometry()
+                    random_values.append(random_val)
+                df_new['Гранулометрия_процент'] = random_values
+                granulo_values = df_new['Гранулометрия_процент'].head().tolist()
+                print(f"BEFORE DB: Пример значений гранулометрии: {granulo_values}")
+                logger.info(f"BEFORE DB: Пример значений гранулометрии: {granulo_values}")
+
                 added_count = add_dataframe_to_db(db, df_new, line.area_name)
                 if added_count > 0:
-                    # Находим максимальное время среди добавленных записей
                     new_last_update = df_new['Время'].max()
-                    # Обновляем запись в БД
                     line.last_update = new_last_update
-                    line.status = "OK" # Обновляем статус на OK
-                    db.add(line) # Добавляем измененный объект line в сессию
+                    line.status = "OK"
+                    db.add(line)
                     try:
                         db.commit() # Коммитим изменения ДЛЯ ЭТОЙ ЛИНИИ
                         db.refresh(line) # Обновляем объект line из БД
@@ -521,8 +548,7 @@ def get_lines_summary(db: Session = Depends(get_db_session)):
                         logger.info(f"Линия {line.area_name}: успешно добавлено {added_count} новых записей. Last_update: {new_last_update}")
                     except Exception as commit_err:
                          logger.error(f"Ошибка коммита при обновлении линии {line.area_name}: {commit_err}")
-                         db.rollback() # Откатываем изменения для этой линии
-                         # Статус оставляем как был до попытки обновления
+                         db.rollback()
                          current_status = db.query(MonitoredLine.status).filter(MonitoredLine.id == line.id).scalar() or line.status
             else:
                      logger.info(f"Линия {line.area_name}: новые записи были найдены, но не добавлены (возможно, пропущены при обработке). Обновление не требуется.")
@@ -551,11 +577,21 @@ def get_lines_summary(db: Session = Depends(get_db_session)):
                                 .order_by(DataModel.Время.desc())\
                                 .limit(20) # Берем последние 20 записей для мини-графика
                 trend_results = trend_query.all()
+                print(f"DB READ: Получено {len(trend_results)} записей для тренда гранулометрии")
+                
+                # Проверка значений из базы
+                for i, row in enumerate(trend_results[:5]):  # Печатаем первые 5 записей
+                    print(f"DB READ: Запись {i}: Время={row.Время}, Гранулометрия={row.Гранулометрия_процент}, тип={type(row.Гранулометрия_процент)}")
+                
                 # Преобразуем в формат TrendDataPoint и разворачиваем порядок, чтобы время шло по возрастанию
-                granulometry_data = [
-                    TrendDataPoint(Время=row.Время, value=row.Гранулометрия_процент) 
-                    for row in reversed(trend_results) # Разворачиваем, чтобы было от старых к новым
-                ]
+                trend_results_list = list(reversed(trend_results))  # Разворачиваем, чтобы было от старых к новым
+                granulometry_data = []
+                
+                for row in trend_results_list:
+                    value = 0.0 if row.Гранулометрия_процент is None else float(row.Гранулометрия_процент)
+                    print(f"TRANSFORM: Преобразование значения {row.Гранулометрия_процент} → {value}")
+                    granulometry_data.append(TrendDataPoint(Время=row.Время, value=value))
+                
                 logger.debug(f"Линия {line.area_name}: Загружено {len(granulometry_data)} точек для тренда гранулометрии.")
             except Exception as trend_err:
                 logger.warning(f"Линия {line.area_name}: Ошибка при получении данных тренда гранулометрии: {trend_err}")

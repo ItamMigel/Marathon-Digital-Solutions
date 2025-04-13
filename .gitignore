@@ -9,7 +9,7 @@ catboost_info
 project_index.md
 **.log
 **.db
-
+test.ipynb
 **build/Release
 
 frontend/node_modules
