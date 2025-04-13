@@ -18,14 +18,15 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+from fastapi.routing import APIRoute
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
 logger = logging.getLogger("server")
 
-# Конфигурация приложения
+
 class Config:
-    DATABASE_URL = "sqlite:///../value.db"  # Match the path from main.py
+    DATABASE_URL = "sqlite:///data/value.db"
     DEBUG = True
     API_VERSION = "1.0.0"
     API_TITLE = "Система телеметрии"
@@ -43,7 +44,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,18 +67,21 @@ if os.path.exists(absolute_path):
     logger.info(f"Database file exists: {absolute_path}")
 else:
     logger.warning(f"Database file NOT FOUND: {absolute_path}")
-    # Попытка найти базу данных в других возможных местах
     possible_paths = [
+        'data/value.db',
+        './data/value.db',
         'value.db',
         '../value.db',
+        '../data/value.db',
         '../../value.db',
         '../../../value.db',
-        os.path.join(os.getcwd(), 'value.db')
+        os.path.join(os.getcwd(), 'data/value.db'),
+        os.path.join(os.getcwd(), 'value.db'),
+        os.path.join(os.getcwd(), '../data/value.db')
     ]
     for path in possible_paths:
         if os.path.exists(path):
             logger.info(f"Found database at: {path}")
-            # Обновляем URL базы данных
             Config.DATABASE_URL = f"sqlite:///{path}"
             engine = create_engine(Config.DATABASE_URL, echo=Config.DEBUG)
             SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -557,7 +561,7 @@ def add_from_pandas(df, area_name='default'):
     with get_db() as db:
         return DataService.add_from_pandas(db, df, area_name=area_name)
 
-def load_data(file_content=None, filename=None, table_name=None, file_type='parquet', file_path=None):
+def load_data(file_content=None, filename=None, table_name=None, file_type='parquet', file_path=None, limit_latest=None):
     """
     Load data from uploaded file content or file path into the specified database table.
     
@@ -567,6 +571,7 @@ def load_data(file_content=None, filename=None, table_name=None, file_type='parq
         table_name (str): Name of the table where data should be loaded (will be created if doesn't exist)
         file_type (str): Type of the file ('parquet' or 'excel')
         file_path (str, optional): Path to the file to load data from (alternative to file_content)
+        limit_latest (int, optional): If set, only loads the latest N records based on the 'Время' column
     
     Returns:
         List: List of added data objects
@@ -649,6 +654,21 @@ def load_data(file_content=None, filename=None, table_name=None, file_type='parq
             if renamed_columns:
                 df = df.rename(columns=renamed_columns)
             
+            # Если требуется загрузить только последние N записей
+            if limit_latest and isinstance(limit_latest, int) and limit_latest > 0:
+                # Преобразуем 'Время' в datetime, если это колонка есть в DataFrame
+                if 'Время' in df.columns:
+                    df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
+                    # Сортируем по времени в убывающем порядке и берем только N последних записей
+                    df = df.sort_values(by='Время', ascending=False).head(limit_latest)
+                    # Сортируем обратно, чтобы сохранить хронологический порядок
+                    df = df.sort_values(by='Время', ascending=True)
+                    logger.info(f"Выбраны последние {limit_latest} записей из файла на основе колонки 'Время'")
+                else:
+                    # Если колонка Время отсутствует, просто берем последние N строк файла
+                    df = df.tail(limit_latest)
+                    logger.info(f"Колонка 'Время' не найдена. Выбраны последние {limit_latest} строк из файла")
+            
             # Загружаем данные в базу данных
             result = add_from_pandas(df, area_name=table_name)
             logger.info(f"Успешно загружено {len(result)} записей из {file_type} файла в таблицу '{table_name}'")
@@ -710,14 +730,14 @@ def get_value(value: ValuesRequest, db: Session = Depends(get_db_session)):
             detail=f"Внутренняя ошибка сервера: {str(e)}"
         )
 
-@app.post('/load-data', tags=["Загрузка данных"])
-async def load_data_endpoint(
+@app.post('/load-data/full', tags=["Загрузка данных"])
+async def load_data_full_endpoint(
     file: UploadFile = File(..., description="Excel или Parquet файл с данными"),
     table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
     file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
 ):
     """
-    Загрузка данных из файла (Excel или Parquet) в указанную таблицу базы данных.
+    Загрузка всей таблицы из файла (Excel или Parquet) в указанную таблицу базы данных.
     Таблица будет создана, если она не существует.
     """
     try:
@@ -785,14 +805,95 @@ async def load_data_endpoint(
             detail=f"Внутренняя ошибка сервера: {str(e)}"
         )
 
-@app.post('/load-data-from-path', tags=["Загрузка данных"])
-async def load_data_from_path_endpoint(
+@app.post('/load-data/latest', tags=["Загрузка данных"])
+async def load_data_latest_endpoint(
+    file: UploadFile = File(..., description="Excel или Parquet файл с данными"),
+    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
+    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)"),
+    limit: int = Form(default=1000, description="Количество последних записей для загрузки")
+):
+    """
+    Загрузка последних N записей из файла (Excel или Parquet) в указанную таблицу базы данных.
+    По умолчанию загружается 1000 последних записей.
+    Таблица будет создана, если она не существует.
+    """
+    try:
+        # Проверка типа файла
+        if file_type.lower() not in ["parquet", "excel"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'."
+            )
+        
+        # Проверка расширения файла
+        file_extension = file.filename.split('.')[-1].lower()
+        expected_extension = "xlsx" if file_type.lower() == "excel" else "parquet"
+        
+        if (file_type.lower() == "excel" and file_extension not in ["xlsx", "xls"]) or \
+           (file_type.lower() == "parquet" and file_extension != "parquet"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Расширение файла не соответствует указанному типу. Ожидалось: {expected_extension}"
+            )
+        
+        # Чтение содержимого файла
+        file_content = await file.read()
+        
+        # Дополнительная диагностика файла
+        import tempfile
+        import os
+        import pandas as pd
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            temp_file.write(file_content)
+            temp_file_path = temp_file.name
+        
+        try:
+            # Чтение файла для предварительного анализа
+            if file_type.lower() == 'parquet':
+                df_preview = pd.read_parquet(temp_file_path)
+            else:
+                df_preview = pd.read_excel(temp_file_path)
+            
+            logger.info(f"Колонки в загружаемом файле: {df_preview.columns.tolist()}")
+            total_records = len(df_preview)
+            logger.info(f"Всего записей в файле: {total_records}, будет загружено последних: {min(limit, total_records)}")
+        finally:
+            os.unlink(temp_file_path)
+        
+        # Загрузка данных
+        result = load_data(
+            file_content=file_content,
+            filename=file.filename,
+            table_name=table_name,
+            file_type=file_type,
+            limit_latest=limit
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Успешно загружены последние {len(result)} записей в таблицу '{table_name}'",
+            "records_count": len(result),
+            "columns_in_file": df_preview.columns.tolist(),
+            "total_records_in_file": total_records
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка в процессе загрузки данных: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Внутренняя ошибка сервера: {str(e)}"
+        )
+
+@app.post('/load-data-from-path/full', tags=["Загрузка данных"])
+async def load_data_from_path_full_endpoint(
     file_path: str = Form(..., description="Путь к Excel или Parquet файлу с данными"),
     table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
     file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
 ):
     """
-    Загрузка данных из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
+    Загрузка всей таблицы из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
     Таблица будет создана, если она не существует.
     """
     try:
@@ -867,7 +968,106 @@ async def load_data_from_path_endpoint(
             detail=f"Внутренняя ошибка сервера: {str(e)}"
         )
 
-# API Endpoints for new monitoring API
+@app.post('/load-data-from-path/latest', tags=["Загрузка данных"])
+async def load_data_from_path_latest_endpoint(
+    file_path: str = Form(..., description="Путь к Excel или Parquet файлу с данными"),
+    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
+    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)"),
+    limit: int = Form(default=1000, description="Количество последних записей для загрузки")
+):
+    """
+    Загрузка последних N записей из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
+    По умолчанию загружается 1000 последних записей.
+    Таблица будет создана, если она не существует.
+    """
+    try:
+        if file_type.lower() not in ["parquet", "excel"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'."
+            )
+        
+        if not os.path.exists(file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Файл не найден по указанному пути: {file_path}"
+            )
+        
+        file_extension = file_path.split('.')[-1].lower()
+        expected_extension = "xlsx" if file_type.lower() == "excel" else "parquet"
+        
+        if (file_type.lower() == "excel" and file_extension not in ["xlsx", "xls"]) or \
+           (file_type.lower() == "parquet" and file_extension != "parquet"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Расширение файла не соответствует указанному типу. Ожидалось: {expected_extension}"
+            )
+        
+        try:
+            if file_type.lower() == 'parquet':
+                df_preview = pd.read_parquet(file_path)
+            else:
+                df_preview = pd.read_excel(file_path)
+            
+            logger.info(f"Колонки в загружаемом файле: {df_preview.columns.tolist()}")
+            total_records = len(df_preview)
+            logger.info(f"Всего записей в файле: {total_records}, будет загружено последних: {min(limit, total_records)}")
+            with open(file_path, 'rb') as f:
+                file_content = f.read()
+            filename = os.path.basename(file_path)
+            result = load_data(
+                file_content=file_content,
+                filename=filename,
+                table_name=table_name,
+                file_type=file_type,
+                limit_latest=limit
+            )
+            
+            return {
+                "status": "success",
+                "message": f"Успешно загружены последние {len(result)} записей из файла '{filename}' в таблицу '{table_name}'",
+                "records_count": len(result),
+                "columns_in_file": df_preview.columns.tolist(),
+                "total_records_in_file": total_records
+            }
+        except Exception as e:
+            logger.error(f"Ошибка при чтении файла {file_path}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Ошибка при чтении файла: {str(e)}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка в процессе загрузки данных из пути к файлу: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Внутренняя ошибка сервера: {str(e)}"
+        )
+
+@app.post('/load-data', tags=["Загрузка данных"])
+async def load_data_endpoint(
+    file: UploadFile = File(..., description="Excel или Parquet файл с данными"),
+    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
+    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
+):
+    """
+    Загрузка данных из файла (Excel или Parquet) в указанную таблицу базы данных.
+    """
+    return await load_data_full_endpoint(file, table_name, file_type)
+
+@app.post('/load-data-from-path', tags=["Загрузка данных"])
+async def load_data_from_path_endpoint(
+    file_path: str = Form(..., description="Путь к Excel или Parquet файлу с данными"),
+    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
+    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
+):
+    """
+    Загрузка данных из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
+    """
+    return await load_data_from_path_full_endpoint(file_path, table_name, file_type)
+
+
 @app.get('/api/tables', response_model=List[TableInfo])
 def get_tables(db: Session = Depends(get_db_session)):
     """Get all available tables in the database"""
@@ -918,8 +1118,6 @@ def get_table_data(
         
         # Base query
         query = db.query(table_model)
-        
-        # Apply filters if provided
         if filters:
             try:
                 filter_parts = filters.split(",")
@@ -938,17 +1136,9 @@ def get_table_data(
                                 query = query.filter(column.like(f"%{value}%"))
             except Exception as e:
                 logger.error(f"Error applying filters: {str(e)}")
-        
-        # Get total count for pagination
         total_count = query.count()
-        
-        # Apply pagination
         query = query.offset((page - 1) * page_size).limit(page_size)
-        
-        # Execute query
         results = query.all()
-        
-        # Convert results to dict
         data = []
         for row in results:
             row_dict = {}
@@ -1009,35 +1199,25 @@ def get_analysis(
         logger.error(f"Error getting analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# Background task to periodically refresh data cache
+
 async def refresh_data_cache():
     """Background task to refresh data cache every 10 minutes"""
     while True:
         try:
             logger.info("Refreshing data cache...")
-            # In a real application, this would update any cached data
-            
-            # Reset model cache to ensure fresh schema
             model_cache.clear()
-            
             logger.info("Data cache refreshed successfully")
         except Exception as e:
             logger.error(f"Error refreshing data cache: {str(e)}")
-        
-        # Wait for 10 minutes before refreshing again
-        await asyncio.sleep(600)  # 600 seconds = 10 minutes
+        await asyncio.sleep(600)
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background tasks when application starts"""
-    # Initialize table models from the database
     try:
         inspector = inspect(engine)
         table_names = inspector.get_table_names()
         
         logger.info(f"Found {len(table_names)} tables in database: {table_names}")
-        
-        # Initialize models for each table
         for table_name in table_names:
             try:
                 table_model = get_table_model(table_name)
@@ -1051,13 +1231,10 @@ async def startup_event():
             create_db([])
     except Exception as e:
         logger.error(f"Error during startup initialization: {str(e)}")
-    
-    # Start the data refresh task
     asyncio.create_task(refresh_data_cache())
     logger.info("Application started, background tasks initialized")
 
 if __name__ == '__main__':
-    # Print the current working directory to help with debugging
     import os
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Attempting to connect to database at: {os.path.abspath(Config.DATABASE_URL.replace('sqlite:///', ''))}")
