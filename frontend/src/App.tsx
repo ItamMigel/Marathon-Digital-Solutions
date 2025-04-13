@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, ChangeEvent, FormEvent } from 'react'
 import { Routes, Route, Link } from 'react-router-dom' // Возвращаем роутинг
 import axios from 'axios'
+// Импортируем компоненты Recharts
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import LineDetailPage from './LineDetailPage' // Импортируем новую страницу
 
 // --- Иконки SVG (оставляем как есть) ---
@@ -28,9 +30,10 @@ const IconQuestion = () => (
 // Интерфейс для ответа от /api/get (используется на главной)
 interface LineStatusResponse {
   area_name: string;
-  last_update: string | null; 
+  last_update: string | null;
   status: string;
-  data: Record<string, any>[]; 
+  // Добавляем поле для данных тренда
+  granulometry_trend: { Время: string; value: number | null }[]; 
 }
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -52,7 +55,7 @@ function DashboardPage() {
     setError(null);
     try {
       const response = await axios.get<LineStatusResponse[]>(`${API_BASE_URL}/api/get`);
-      // Сохраняем все, но LineCard будет использовать только name, status, last_update
+      // Сохраняем все, включая новые данные тренда
       setLines(response.data);
     } catch (err: any) {
       console.error('Ошибка загрузки данных линий:', err);
@@ -133,6 +136,15 @@ function DashboardPage() {
         statusColorClass = 'text-red-600';
     }
 
+    // --- Форматирование данных для графика ---
+    const chartData = line.granulometry_trend
+      .map(point => ({
+          // Форматируем время для оси X (например, "ЧЧ:ММ")
+          time: new Date(point.Время).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 
+          value: point.value,
+      }))
+      .filter(point => point.value !== null); // Убираем точки с null значением, если они есть
+
     return (
       // Оборачиваем всю карточку в Link, КРОМЕ кнопки удаления
       <div className="relative flex flex-col border rounded-lg shadow-sm overflow-hidden bg-card group">
@@ -151,6 +163,52 @@ function DashboardPage() {
                   </p>
               )}
           </Link>
+           {/* --- Блок с графиком --- */}
+           <div className="p-4 flex-grow"> {/* Занимает оставшееся место */}
+               {chartData.length > 1 ? ( // Показываем график только если есть хотя бы 2 точки
+                   <div style={{ width: '100%', height: 100 }}> {/* Задаем высоту контейнера графика */}
+                       <ResponsiveContainer>
+                           <LineChart 
+                             data={chartData}
+                             margin={{ top: 5, right: 10, left: -25, bottom: 0 }} // Настраиваем отступы
+                           >
+                               <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" vertical={false} /> {/* Сетка */}
+                               <XAxis 
+                                 dataKey="time" 
+                                 tick={{ fontSize: 10, fill: '#6b7280' }} // Стиль тиков оси X
+                                 axisLine={false} // Убираем линию оси X
+                                 tickLine={false} // Убираем риски оси X
+                                 interval="preserveStartEnd" // Показываем первый и последний тик
+                               />
+                               <YAxis 
+                                 tick={{ fontSize: 10, fill: '#6b7280' }} // Стиль тиков оси Y
+                                 axisLine={false} // Убираем линию оси Y
+                                 tickLine={false} // Убираем риски оси Y
+                                 domain={['auto', 'auto']} // Автоматический диапазон
+                                 width={30} // Ширина области оси Y
+                               />
+                               <Tooltip 
+                                 contentStyle={{ fontSize: 12, padding: '4px 8px', borderRadius: '4px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} 
+                                 labelFormatter={(label) => `Время: ${label}`} // Формат заголовка тултипа
+                                 formatter={(value) => [value?.toFixed(2), 'Гранулометрия']} // Формат значения в тултипе
+                               />
+                               <Line 
+                                 type="monotone" 
+                                 dataKey="value" 
+                                 stroke="#4f46e5" // Цвет линии (indigo)
+                                 strokeWidth={1.5} 
+                                 dot={false} // Убираем точки на линии
+                                 activeDot={{ r: 4, strokeWidth: 0, fill: '#4f46e5' }} // Стиль активной точки при наведении
+                               />
+                           </LineChart>
+                       </ResponsiveContainer>
+                   </div>
+               ) : (
+                    <div className="flex items-center justify-center h-[100px] text-xs text-gray-400">
+                        {isLoading ? 'Загрузка данных...' : 'Недостаточно данных для графика'}
+                    </div>
+                )}
+           </div>
            {/* Кнопка удаления остается НАД ссылкой */}
            <button
               onClick={handleDelete}

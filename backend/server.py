@@ -19,12 +19,12 @@ from sqlalchemy.sql import func # для func.now() и func.count()
 from fastapi import FastAPI, Depends, HTTPException, status, Query # Добавляем Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import uvicorn  
+import uvicorn
 import requests
 import json
 
 # --- Конфигурация и Логгирование ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
 logger = logging.getLogger("server")
 
 class Config:
@@ -243,17 +243,18 @@ def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
         
     valid_columns = [c.key for c in DataModel.__table__.columns]
     added_count = 0
-    skipped_count = 0 # Счетчик пропущенных строк
-    renamed_count = 0 # Счетчик переименованных колонок
+    skipped_count = 0
+    renamed_count = 0
     total_rows = len(df)
 
     logger.info(f"Начинаем обработку {total_rows} строк для добавления в {area_name}.")
 
+    # Внешний try для общих ошибок обработки DataFrame
     try:
-        # Переименование колонок по field_mapping (можно вынести)
+        # Переименование колонок
         field_mapping = {
             'Время': 'Время',
-            'Мощность МПСИ кВт': 'Мощность_МПСИ_кВт', # и т.д. все поля как были раньше
+            'Мощность МПСИ кВт': 'Мощность_МПСИ_кВт',
             'Мощность МШЦ кВт': 'Мощность_МШЦ_кВт',
             'Ток МПСИ А': 'Ток_МПСИ_А',
             'Ток МШЦ А': 'Ток_МШЦ_А',
@@ -288,63 +289,137 @@ def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
             'Расход оборотной воды м3/ч': 'Расход_оборотной_воды_м3_ч',
             'Расход в ГЦ насоса м3/ч': 'Расход_в_ГЦ_насоса_м3_ч'
         }
+
         renamed_columns_mapping = {old: new for old, new in field_mapping.items() if old in df.columns and old != new}
         if renamed_columns_mapping:
             df = df.rename(columns=renamed_columns_mapping)
             renamed_count = len(renamed_columns_mapping)
             logger.info(f"Переименовано {renamed_count} колонок для {area_name}.")
-        
-        # Преобразование времени - КЛЮЧЕВОЙ МОМЕНТ
+
+        # Преобразование времени
         if 'Время' in df.columns:
-            original_time_col = df['Время'].copy() # Копируем для логгирования ошибок
+            original_time_col = df['Время'].copy()
             df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
-            # Логгируем строки, где время не распарсилось
             failed_time_parse_indices = df[df['Время'].isna()].index
             if not failed_time_parse_indices.empty:
                 logger.warning(f"Не удалось распознать 'Время' в {len(failed_time_parse_indices)} строках для {area_name}. Примеры некорректных значений:")
-                for index in failed_time_parse_indices[:5]: # Показываем первые 5
-                     logger.warning(f"  Строка {index}: '{original_time_col.loc[index]}'")
-        else:
-             logger.error(f"Критическая ошибка: Колонка 'Время' не найдена в данных для {area_name}. Невозможно добавить данные.")
-             return 0 # Не можем сохранить без времени
+                for index in failed_time_parse_indices[:5]:
+                    logger.warning(f"  Строка {index}: '{original_time_col.loc[index]}'")
+                df = df.dropna(subset=['Время']) # Удаляем строки с нераспознанным временем ЗДЕСЬ
+                if df.empty: # Проверяем, остались ли строки после удаления
+                    logger.error(f"Критическая ошибка: После удаления строк с нераспознанным временем не осталось данных для {area_name}.")
+                    return 0
+        else: # Добавлен правильный отступ
+            logger.error(f"Критическая ошибка: Колонка 'Время' не найдена в данных для {area_name}. Невозможно добавить данные.")
+            return 0
 
-        # Итерация по строкам DataFrame
-        for index, row in df.iterrows(): # Используем index для логгирования
-            # Проверяем, было ли время успешно преобразовано
+        # Итерация по строкам
+        for index, row in df.iterrows():
             if pd.isna(row.get('Время')):
-                # Мы уже залоггировали это выше, просто увеличиваем счетчик
                 skipped_count += 1
                 continue
 
-            # Фильтруем данные по валидным колонкам и убираем NaN/None
-            data_dict = {k: v for k, v in row.to_dict().items() 
+            data_dict = {k: v for k, v in row.to_dict().items()
                          if k in valid_columns and pd.notna(v)}
 
-            # Проверяем, есть ли вообще данные для вставки (кроме времени, если оно было)
             if not data_dict or (len(data_dict) == 1 and 'Время' in data_dict):
-                 logger.warning(f"Строка {index} для {area_name} не содержит валидных данных (кроме, возможно, времени), пропуск.")
-                 skipped_count += 1
-                 continue
-
-            try:
-                # Создаем экземпляр модели только с валидными данными
-                data_instance = DataModel(**data_dict)
-                # Используем merge для избежания дубликатов по первичному ключу (id)
-                # Если PK нет в CSV, это будет работать как INSERT
-                db.merge(data_instance) 
-                added_count += 1
-            except Exception as e:
-                logger.error(f"Ошибка при подготовке/слиянии записи (строка DataFrame {index}) в {area_name}: {e}")
-                logger.debug(f"Проблемные данные строки {index}: {data_dict}")
+                logger.warning(f"Строка {index} для {area_name} не содержит валидных данных (кроме, возможно, времени), пропуск.")
                 skipped_count += 1
                 continue
-        
+
+            # Внутренний try для ошибок слияния отдельных строк
+            try:
+                data_instance = DataModel(**data_dict)
+                db.merge(data_instance)
+                added_count += 1
+            except Exception as merge_err:
+                logger.error(f"Ошибка при подготовке/слиянии записи (строка DataFrame {index}) в {area_name}: {merge_err}")
+                logger.debug(f"Проблемные данные строки {index}: {data_dict}")
+                skipped_count += 1
+
         logger.info(f"Обработка для {area_name} завершена. Подготовлено: {added_count}, Пропущено: {skipped_count} из {total_rows} строк.")
         return added_count
 
-    except Exception as e:
+    except Exception as e: # Добавлен except к внешнему try
         logger.error(f"Критическая ошибка при обработке DataFrame для {area_name}: {e}\n{traceback.format_exc()}")
-        return 0 # Возвращаем 0, так как ничего не было подготовлено
+        return 0
+
+# Новая функция для чтения только новых записей
+def read_new_csv_records(file_path: str, last_known_timestamp: Optional[datetime.datetime]) -> Optional[pd.DataFrame]:
+    """Читает CSV и возвращает DataFrame только с записями новее last_known_timestamp."""
+    logger.debug(f"Функция read_new_csv_records вызвана для {file_path}. last_known_timestamp: {last_known_timestamp} (Тип: {type(last_known_timestamp)})")
+    
+    if not os.path.exists(file_path):
+        logger.debug(f"Файл {file_path} не найден при проверке новых записей.")
+        return None
+    if last_known_timestamp is None:
+        logger.debug(f"last_known_timestamp is None для {file_path}, пропускаем проверку новых записей.")
+        return None
+        
+    # Отступ 4 пробела
+    try:
+        # Отступ 8 пробелов
+        try:
+            df = pd.read_csv(file_path, sep=',', encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            df = pd.read_csv(file_path, sep=',', encoding='cp1251')
+        
+        if df.empty:
+            return None
+
+        # Преобразуем время
+        if 'Время' not in df.columns:
+            logger.warning(f"Нет колонки 'Время' в {file_path} при проверке новых записей.")
+            return None
+        df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
+        df = df.dropna(subset=['Время']) # Удаляем строки с невалидным временем
+        
+        if df.empty: # Проверяем после удаления строк с некорректным временем
+             logger.debug(f"Нет валидных записей со временем в {file_path}.")
+             return None
+
+        # ----- ДОБАВЛЯЕМ ДЕТАЛЬНОЕ ЛОГГИРОВАНИЕ ПЕРЕД СРАВНЕНИЕМ -----
+        logger.debug(f"[{file_path}] Перед сравнением: last_known_timestamp = {last_known_timestamp} (type: {type(last_known_timestamp)})")
+        logger.debug(f"[{file_path}] Перед сравнением: df['Время'].dtype = {df['Время'].dtype}")
+        logger.debug(f"[{file_path}] Перед сравнением: Первые 5 значений df['Время']: \n{df['Время'].head().to_string()}")
+        logger.debug(f"[{file_path}] Перед сравнением: Последние 5 значений df['Время']: \n{df['Время'].tail().to_string()}")
+        # --------------------------------------------------------------
+        
+        # Фильтруем по времени
+        df_new = None # Инициализируем
+        try:
+            # Пробуем прямое сравнение
+            df_new = df[df['Время'] > last_known_timestamp]
+            logger.debug(f"[{file_path}] После прямого сравнения найдено {len(df_new) if df_new is not None else 'None'} новых строк.")
+        except TypeError as te:
+            # ... (обработка TypeError и попытка конвертации - оставляем как есть) ...
+            logger.warning(f"Ошибка сравнения времени для {file_path} (возможно, aware vs naive): {te}. Попытка приведения к naive.")
+            try:
+                # ... (код конвертации) ...
+                df_new = df[df_time_naive > last_known_naive]
+                logger.debug(f"[{file_path}] После сравнения с конвертацией найдено {len(df_new) if df_new is not None else 'None'} новых строк.")
+            except Exception as convert_err:
+                 logger.error(f"Не удалось исправить ошибку сравнения времени для {file_path}: {convert_err}")
+                 return None
+        
+        # Проверяем результат фильтрации
+        if df_new is None or df_new.empty:
+             logger.debug(f"Новых записей в {file_path} не найдено после {last_known_timestamp}.")
+             return None
+        else: # Исправлен отступ
+            max_new_time = df_new['Время'].max()
+            logger.info(f"Найдено {len(df_new)} новых записей в {file_path}. Максимальное новое время: {max_new_time}")
+            return df_new
+
+    # Отступ 4 пробела (соответствует внешнему try)
+    except pd.errors.EmptyDataError:
+        # Отступ 8 пробелов
+        logger.debug(f"CSV файл {file_path} пуст при проверке новых записей.")
+        return None
+    except Exception as e:
+        # Отступ 8 пробелов
+        logger.error(f"Ошибка чтения/фильтрации CSV файла {file_path} для новых записей: {e}")
+        return None
 
 # --- Pydantic схемы для API --- 
 class AddLineRequest(BaseModel):
@@ -357,6 +432,11 @@ class PaginationInfo(BaseModel):
     page_size: int
     total_items: int
     total_pages: int
+
+# Модель для данных тренда (Время и Значение)
+class TrendDataPoint(BaseModel):
+    Время: datetime.datetime
+    value: Optional[float] = None
 
 # Обновляем LineDetailResponse
 class LineDetailResponse(BaseModel):
@@ -372,37 +452,98 @@ class LineSummaryResponse(BaseModel):
     area_name: str
     last_update: Optional[datetime.datetime] = None
     status: str # Поле уже есть, будет браться из БД
-    # Комментарий сюда не добавляем для краткости
+    # Добавляем поле для данных тренда гранулометрии
+    granulometry_trend: List[TrendDataPoint] = [] 
 
 # --- API Эндпоинты --- 
 
-# Изменяем /api/get чтобы возвращать статус из БД
+# Изменяем /api/get для автоматического обновления данных
 @app.get('/api/get', response_model=List[LineSummaryResponse], tags=["Мониторинг"])
 def get_lines_summary(db: Session = Depends(get_db_session)):
-    """Получить сводный статус для всех отслеживаемых линий (без данных)."""
+    """Получить сводный статус для всех линий, ПРЕДВАРИТЕЛЬНО ОБНОВИВ ДАННЫЕ из CSV."""
+    logger.info("Запрос /api/get: Начинаем проверку и обновление данных линий...")
     lines_info = db.query(MonitoredLine).all()
     response = []
 
     for line in lines_info:
-        current_status = line.status # Берем статус из БД
-        
-        # Дополнительная проверка: если статус OK/Неизвестно, но файл пропал - меняем статус
+        logger.debug(f"Обработка линии: {line.area_name}")
+        current_status = line.status
+        last_update_time = line.last_update
+
+        # 1. Попытка прочитать и добавить новые данные
+        try:
+            df_new = read_new_csv_records(line.file_path, line.last_update)
+            if df_new is not None:
+                added_count = add_dataframe_to_db(db, df_new, line.area_name)
+                if added_count > 0:
+                    # Находим максимальное время среди добавленных записей
+                    new_last_update = df_new['Время'].max()
+                    # Обновляем запись в БД
+                    line.last_update = new_last_update
+                    line.status = "OK" # Обновляем статус на OK
+                    db.add(line) # Добавляем измененный объект line в сессию
+                    try:
+                        db.commit() # Коммитим изменения ДЛЯ ЭТОЙ ЛИНИИ
+                        db.refresh(line) # Обновляем объект line из БД
+                        last_update_time = line.last_update # Обновляем для ответа
+                        current_status = line.status
+                        logger.info(f"Линия {line.area_name}: успешно добавлено {added_count} новых записей. Last_update: {new_last_update}")
+                    except Exception as commit_err:
+                         logger.error(f"Ошибка коммита при обновлении линии {line.area_name}: {commit_err}")
+                         db.rollback() # Откатываем изменения для этой линии
+                         # Статус оставляем как был до попытки обновления
+                         current_status = db.query(MonitoredLine.status).filter(MonitoredLine.id == line.id).scalar() or line.status
+            else:
+                     logger.info(f"Линия {line.area_name}: новые записи были найдены, но не добавлены (возможно, пропущены при обработке). Обновление не требуется.")
+        except Exception as update_err:
+            logger.error(f"Ошибка при попытке обновления данных для линии {line.area_name}: {update_err}")
+            db.rollback() # Откатываем, если ошибка произошла во время add_dataframe_to_db
+            # Статус не меняем, используем тот, что был в начале итерации
+
+        # 2. Финальная проверка статуса (файл, таблица)
         if current_status in ["OK", "Неизвестно"] and not os.path.exists(line.file_path):
             current_status = "Ошибка: Файл не найден"
-            # Тут можно было бы обновить статус в БД, но GET запросы не должны менять данные
-            # db.query(MonitoredLine).filter(MonitoredLine.id == line.id).update({"status": current_status})
-            # db.commit()
-            logger.warning(f"Файл для линии {line.area_name} не найден, статус временно изменен на 'Ошибка: Файл не найден' для ответа.")
-        # Можно добавить и другие проверки, если статус из БД устарел
+            logger.warning(f"Файл для линии {line.area_name} не найден, статус для ответа: '{current_status}'.")
+        
+        # (Опционально) Проверка существования таблицы данных, если статус ОК/Неизвестно
+        # inspector = inspect(engine)
+        # if current_status in ["OK", "Неизвестно"] and not inspector.has_table(line.area_name):
+        #    current_status = "Ошибка: Таблица данных не найдена"
+        #    logger.warning(f"Таблица данных {line.area_name} не найдена, статус для ответа: '{current_status}'.")
 
+        # 3. Получаем данные для тренда гранулометрии
+        granulometry_data = []
+        DataModel = get_table_model(line.area_name) 
+        if DataModel and hasattr(DataModel, 'Время') and hasattr(DataModel, 'Гранулометрия_процент'):
+            try:
+                trend_query = db.query(DataModel.Время, DataModel.Гранулометрия_процент)\
+                                .order_by(DataModel.Время.desc())\
+                                .limit(20) # Берем последние 20 записей для мини-графика
+                trend_results = trend_query.all()
+                # Преобразуем в формат TrendDataPoint и разворачиваем порядок, чтобы время шло по возрастанию
+                granulometry_data = [
+                    TrendDataPoint(Время=row.Время, value=row.Гранулометрия_процент) 
+                    for row in reversed(trend_results) # Разворачиваем, чтобы было от старых к новым
+                ]
+                logger.debug(f"Линия {line.area_name}: Загружено {len(granulometry_data)} точек для тренда гранулометрии.")
+            except Exception as trend_err:
+                logger.warning(f"Линия {line.area_name}: Ошибка при получении данных тренда гранулометрии: {trend_err}")
+        elif not DataModel:
+             logger.warning(f"Линия {line.area_name}: Модель данных не найдена, тренд гранулометрии не будет загружен.")
+        elif not hasattr(DataModel, 'Время') or not hasattr(DataModel, 'Гранулометрия_процент'):
+            logger.warning(f"Линия {line.area_name}: Отсутствует столбец 'Время' или 'Гранулометрия_процент', тренд не будет загружен.")
+
+        # 4. Добавляем результат в ответ (было 3)
         response.append(
             LineSummaryResponse(
                 area_name=line.area_name,
-                last_update=line.last_update,
-                status=current_status # Возвращаем актуальный (возможно, вычисленный) статус
+                last_update=last_update_time, # Используем обновленное время, если было
+                status=current_status,
+                granulometry_trend=granulometry_data # Добавляем данные тренда
             )
         )
     
+    logger.info(f"Запрос /api/get: Проверка и обновление завершены. Возвращено {len(response)} линий.")
     return response
 
 @app.post('/api/add', status_code=status.HTTP_201_CREATED, tags=["Мониторинг"])
@@ -433,12 +574,10 @@ def add_monitored_line(request: AddLineRequest, db: Session = Depends(get_db_ses
     added_count = 0
     new_line = None
     try:
-        # Создаем запись в таблице метаданных (статус будет "Неизвестно" по умолчанию)
+        # Создаем запись в таблице метаданных
         new_line = MonitoredLine(
             area_name=request.area_name,
             file_path=request.file_path
-            # status установится по умолчанию "Неизвестно"
-            # comment будет NULL
         )
         db.add(new_line)
         db.flush() 
@@ -447,25 +586,37 @@ def add_monitored_line(request: AddLineRequest, db: Session = Depends(get_db_ses
         # Читаем начальные данные CSV 
         df_initial = read_initial_csv_data(request.file_path, max_lines=1440) 
 
-        initial_data_added = False # Флаг, что начальные данные были добавлены
+        initial_data_added = False
         if df_initial is not None and not df_initial.empty:
             logger.info(f"Прочитано {len(df_initial)} строк из CSV для начальной загрузки в {request.area_name}.")
-            added_count = add_dataframe_to_db(db, df_initial, request.area_name)
-            if added_count > 0:
-                 # Обновляем last_update и СТАТУС на "OK", если данные успешно добавлены
-                 new_line.last_update = func.now()
-                 new_line.status = "OK" # Меняем статус на OK
-                 db.add(new_line) 
-                 initial_data_added = True
-                 logger.info(f"Начальные данные ({added_count} шт.) для {request.area_name} подготовлены, статус изменен на 'OK'.")
+            
+            # Важно: преобразуем 'Время' ПЕРЕД добавлением в БД и взятием max()
+            if 'Время' in df_initial.columns:
+                df_initial['Время'] = pd.to_datetime(df_initial['Время'], errors='coerce')
+                df_initial = df_initial.dropna(subset=['Время']) # Убираем строки с невалидным временем
             else:
-                 logger.warning(f"Не удалось подготовить начальные данные для {request.area_name}. Статус останется '{new_line.status}'.")
-        else:
-             logger.warning(f"Не удалось прочитать начальные данные для {request.area_name}. Статус останется '{new_line.status}'.")
-             
+                logger.error(f"Нет колонки 'Время' в начальных данных для {request.area_name}. Невозможно добавить.")
+                df_initial = None # Сбрасываем df, чтобы не пытаться добавить
+                
+            if df_initial is not None and not df_initial.empty: # Проверяем еще раз после обработки времени
+                added_count = add_dataframe_to_db(db, df_initial, request.area_name)
+                if added_count > 0:
+                    # Находим максимальное время СРЕДИ ДОБАВЛЕННЫХ начальных записей
+                    max_initial_timestamp = df_initial['Время'].max()
+                    # Исправляем установку last_update!
+                    new_line.last_update = max_initial_timestamp 
+                    new_line.status = "OK" 
+                    db.add(new_line) 
+                    initial_data_added = True
+                    logger.info(f"Начальные данные ({added_count} шт.) для {request.area_name} подготовлены. last_update установлен на {max_initial_timestamp}, статус изменен на 'OK'.")
+                else: # Исправлен отступ
+                    logger.warning(f"Не удалось добавить начальные данные для {request.area_name} (возможно, все пропущены). Статус останется '{new_line.status}'.")
+            else: # Исправлен отступ и текст лога
+                 logger.warning(f"В начальных данных для {request.area_name} не найдено валидных записей со временем после обработки или сам DataFrame пуст. Статус останется '{new_line.status}'.")
+                 
         db.commit() 
         db.refresh(new_line) 
-        logger.info(f"Линия {new_line.area_name} успешно сохранена со статусом '{new_line.status}'. Начальных данных добавлено: {added_count} шт.")
+        logger.info(f"Линия {new_line.area_name} успешно сохранена со статусом '{new_line.status}' и last_update '{new_line.last_update}'. Начальных данных добавлено: {added_count} шт.")
 
         return {"message": "Производственная линия успешно добавлена", "area_name": new_line.area_name, "added_initial_records": added_count, "initial_status": new_line.status}
 
@@ -529,94 +680,90 @@ def delete_monitored_line(area_name: str, db: Session = Depends(get_db_session))
 @app.get('/api/lines/{area_name}', response_model=LineDetailResponse, tags=["Мониторинг"])
 def get_single_line_status(
     area_name: str,
-    page: int = Query(1, ge=1, description="Номер страницы"), # Используем Query для валидации
-    page_size: int = Query(20, ge=1, le=100, description="Размер страницы"), # Лимит и валидация размера
+    page: int = Query(1, ge=1, description="Номер страницы"),
+    page_size: int = Query(20, ge=1, le=100, description="Размер страницы"), 
     db: Session = Depends(get_db_session)
 ):
     """Получить статус и ПАГИНИРОВАННЫЕ данные для ОДНОЙ отслеживаемой линии."""
     logger.info(f"Запрос данных для линии: {area_name}, страница: {page}, размер: {page_size}")
-
     line = db.query(MonitoredLine).filter(MonitoredLine.area_name == area_name).first()
     if not line:
         logger.warning(f"Линия {area_name} не найдена при запросе GET /api/lines/{area_name}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Линия '{area_name}' не найдена.")
 
-    # Инициализируем значения по умолчанию
-    current_status = line.status # Берем статус из БД
-    current_comment = line.comment # Берем комментарий из БД
+    # Инициализация (отступ 4 пробела)
+    current_status = line.status
+    current_comment = line.comment
     data_records = []
     total_items = 0
     total_pages = 0
+    # `page` уже определен в параметрах функции, инициализировать не нужно
     
-    # Дополнительная проверка файла (как в /api/get)
+    # Проверка файла (отступ 4 пробела)
     if current_status in ["OK", "Неизвестно"] and not os.path.exists(line.file_path):
+        # Отступ 8 пробелов
         current_status = "Ошибка: Файл не найден"
         logger.warning(f"Файл для линии {line.area_name} не найден, статус временно изменен на '{current_status}' для ответа.")
-        # В этом случае пагинация будет (0, 0, 0, 0), данные не читаем
     else:
-        # Пытаемся прочитать данные из таблицы БД (логика пагинации без изменений)
+        # Отступ 8 пробелов - Начинаем блок try для чтения данных
         try:
+            # Отступ 12 пробелов
             DataModel = get_table_model(line.area_name)
             if DataModel:
+                # Отступ 16 пробелов
                 if hasattr(DataModel, 'id') and hasattr(DataModel, 'Время'): 
-                    # Получаем общее количество записей
-                    count_query = db.query(func.count(DataModel.id)) # Считаем по PK
+                    # Отступ 20 пробелов
+                    count_query = db.query(func.count(DataModel.id))
                     total_items = count_query.scalar()
                     logger.info(f"Найдено {total_items} записей в таблице {area_name}.")
 
                     if total_items > 0:
-                        # Рассчитываем общее количество страниц
-                        total_pages = (total_items + page_size - 1) // page_size # Округление вверх
-                        
-                        # Корректируем номер страницы, если он выходит за пределы
+                        # Отступ 24 пробела
+                        total_pages = (total_items + page_size - 1) // page_size
+                        # Корректируем page ДО вычисления offset
                         page = max(1, min(page, total_pages))
-                        
-                        # Рассчитываем смещение
                         offset = (page - 1) * page_size
-
-                        # Получаем пагинированные данные, сортируем по времени (desc - последние первыми)
-                        # УБИРАЕМ .limit(60) отсюда, полагаемся на offset/limit пагинации
                         paginated_query = db.query(DataModel).order_by(DataModel.Время.desc()).offset(offset).limit(page_size)
                         latest_data = paginated_query.all()
                         logger.info(f"Запрошено {len(latest_data)} записей для страницы {page}.")
                         
-                        # Преобразуем данные в словари 
                         inspector = inspect(DataModel)
                         columns = [c.key for c in inspector.columns]
                         data_records = []
                         for record in latest_data:
+                            # Отступ 28 пробелов
                             data_dict = {col: getattr(record, col, None) for col in columns}
                             if isinstance(data_dict.get('Время'), datetime.datetime):
+                                # Отступ 32 пробела
                                 data_dict['Время'] = data_dict['Время'].isoformat()
                             data_records.append(data_dict)
                     else:
-                        # Если записей нет, total_pages = 0, page = 1
+                        # Отступ 24 пробела
                         total_pages = 0
                         page = 1 
                         logger.info(f"Таблица {line.area_name} пуста, данные не возвращаются.")
-
                 else:
-                    current_status = "Ошибка: В таблице нет колонки 'Время' или 'id'" # Обновляем статус, если проблема с таблицей
+                    # Отступ 16 пробелов
+                    current_status = "Ошибка: В таблице нет колонки 'Время' или 'id'"
                     logger.error(f"Таблица {line.area_name} не имеет колонки 'Время' или 'id' для пагинации.")
-                    # Сбрасываем пагинацию и данные
                     total_items, total_pages, page, data_records = 0, 0, 1, []
             else:
-                current_status = "Ошибка: Таблица данных не найдена" # Обновляем статус
+                # Отступ 12 пробелов
+                current_status = "Ошибка: Таблица данных не найдена"
                 logger.warning(f"Не найдена модель/таблица для {line.area_name} при запросе GET /api/lines/...")
-                # Сбрасываем пагинацию и данные
                 total_items, total_pages, page, data_records = 0, 0, 1, []
-        except Exception as e:
-             logger.error(f"Ошибка чтения/пагинации данных из таблицы {line.area_name}: {e}\n{traceback.format_exc()}")
-             current_status = "Ошибка: Чтения/обработки данных из БД" # Обновляем статус
-             # Сбрасываем пагинацию при ошибке чтения
-             total_items, total_pages, page, data_records = 0, 0, 1, []
+        except Exception as e: # Добавлен except
+            # Отступ 12 пробелов
+            logger.error(f"Ошибка чтения/пагинации данных из таблицы {line.area_name}: {e}\n{traceback.format_exc()}")
+            current_status = "Ошибка: Чтения/обработки данных из БД"
+            total_items, total_pages, page, data_records = 0, 0, 1, []
 
-    # Возвращаем новый формат ответа
+    # Возврат ответа (отступ 4 пробела)
     return LineDetailResponse(
         area_name=line.area_name,
         last_update=line.last_update,
-        status=current_status, # Возвращаем актуальный статус
-        comment=current_comment, # Возвращаем комментарий из БД
+        status=current_status,
+        comment=current_comment,
         data=data_records, 
         pagination=PaginationInfo(
             page=page,
@@ -667,26 +814,33 @@ def generate_response_sync(prompt, model="deepseek-ai/DeepSeek-V3-0324", max_tok
     response = requests.post(url, headers=headers, json=data, stream=True)
     
     # Обработка потокового ответа
-    for line in response.iter_lines():
-        if line:
-            try:
-                line_text = line.decode('utf-8')
-                if line_text.startswith('data: '):
-                    line_text = line_text[6:]
+    try: # Добавлен try для обработки ошибок requests
+        for line in response.iter_lines():
+            if line:
+                try:
+                    line_text = line.decode('utf-8')
+                    if line_text.startswith('data: '):
+                        line_text = line_text[6:]
                 
-                if line_text.strip() and line_text != '[DONE]':
-                    parsed = json.loads(line_text)
-                    content = parsed.get('choices', [{}])[0].get('delta', {}).get('content', '')
-                    if content:
-                        full_response += content
-            except json.JSONDecodeError:
-                if line_text.strip() == '[DONE]':
-                    break
-                continue
-            except Exception as e:
-                logger.error(f"Error parsing LLM response: {str(e)}")
-                continue
-    
+                    if line_text.strip() and line_text != '[DONE]':
+                        parsed = json.loads(line_text)
+                        content = parsed.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                        if content:
+                            full_response += content
+                except json.JSONDecodeError:
+                    if line_text.strip() == '[DONE]':
+                        break
+                    logger.error(f"Error parsing JSON line from LLM response: {line_text}") # Логгируем ошибку парсинга JSON
+                    continue # Пропускаем эту строку, но продолжаем цикл
+                except Exception as e: # Ловим другие ошибки декодирования/обработки строки
+                    logger.error(f"Error processing line from LLM response: {str(e)}")
+                    continue
+    except Exception as e: # Ловим ошибки на уровне requests (например, сетевые)
+            logger.error(f"Error during LLM API request or stream processing: {str(e)}")
+            # В случае ошибки запроса, возможно, стоит вернуть пустой ответ или поднять исключение
+            # Здесь просто вернем то, что успели собрать
+            pass # Не используем continue здесь, т.к. мы вне цикла
+
     return full_response
 
 @app.post('/api/llm', response_model=LLMResponse, tags=["Нейросеть"])
@@ -725,15 +879,17 @@ def llm_endpoint(request: LLMRequest):
 # --- Инициализация Приложения --- 
 def initialize_database():
     """Создает все таблицы, определенные через Base.metadata."""
+    # Отступ 4 пробела
     try:
+        # Отступ 8 пробелов
         logger.info("Инициализация базы данных... Проверка таблиц.")
-        # Создаем ТОЛЬКО таблицу monitored_lines при старте
-        # Base.metadata.create_all(bind=engine)
         MonitoredLine.__table__.create(bind=engine, checkfirst=True)
         logger.info("Таблица 'monitored_lines' успешно проверена/создана.")
-    except Exception as e:
+    # Отступ 4 пробела (соответствует try)
+    except Exception as e: # Добавлен except
+        # Отступ 8 пробелов
         logger.error(f"Ошибка при инициализации таблицы monitored_lines: {e}\n{traceback.format_exc()}")
-        raise # Критическая ошибка, приложение не может работать без этой таблицы
+        raise
 
 @app.on_event("startup")
 async def startup_event():
