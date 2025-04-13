@@ -2,6 +2,8 @@ import datetime
 import logging
 import os
 import asyncio
+import json
+import requests
 from contextlib import contextmanager
 from typing import List, Optional, Dict, Any
 
@@ -155,6 +157,17 @@ class AnalysisResult(BaseModel):
     production_line: Optional[int] = None
     summary: Dict[str, Any]
     recommendations: List[str]
+
+class LLMRequest(BaseModel):
+    prompt: str
+    model: str = "deepseek-ai/DeepSeek-V3-0324"
+    max_tokens: int = 2024
+    temperature: float = 0.7
+    role: str = "Ты не пишешь лишние комментарии, только ответ. Тебе будет передавать запрос, из которого нужно будет сделать json схему для построения графика на React."
+
+class LLMResponse(BaseModel):
+    response: str
+    execution_time: float
 
 # Кеш для хранения созданных моделей
 _model_cache = {}
@@ -1199,6 +1212,100 @@ def get_analysis(
         logger.error(f"Error getting analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+def generate_response_sync(prompt, model="deepseek-ai/DeepSeek-V3-0324", max_tokens=2024, temperature=0.7, role="user"):
+    """
+    Synchronously generate a response from the LLM API.
+    
+    Args:
+        prompt: The user prompt to send to the model
+        model: Model name to use
+        max_tokens: Maximum tokens in the response
+        temperature: Temperature setting for response randomness
+        role: The role of the message sender (e.g., "user", "assistant", "system")
+        
+    Returns:
+        The generated text response as a string
+    """
+    api_key = 'cpk_b9f646794b554414935934ec5a3513de.f78245306f06593ea49ef7bce2228c8e.kHJVJjyK8dtqB0oD2Ofv4AaME6MSnKDy'
+    url = 'https://llm.chutes.ai/v1/chat/completions'
+    
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json'
+    }
+    
+    data = {
+        'model': model,
+        'messages': [
+            {
+                'role': role,
+                'content': prompt
+            }
+        ],
+        'stream': True,  # Используем потоковую передачу как в примере
+        'max_tokens': max_tokens,
+        'temperature': temperature
+    }
+    
+    full_response = ""
+    
+    # Используем requests вместо aiohttp
+    response = requests.post(url, headers=headers, json=data, stream=True)
+    
+    # Обработка потокового ответа
+    for line in response.iter_lines():
+        if line:
+            try:
+                line_text = line.decode('utf-8')
+                if line_text.startswith('data: '):
+                    line_text = line_text[6:]
+                
+                if line_text.strip() and line_text != '[DONE]':
+                    parsed = json.loads(line_text)
+                    content = parsed.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                    if content:
+                        full_response += content
+            except json.JSONDecodeError:
+                if line_text.strip() == '[DONE]':
+                    break
+                continue
+            except Exception as e:
+                logger.error(f"Error parsing LLM response: {str(e)}")
+                continue
+    
+    return full_response
+
+@app.post('/api/llm', response_model=LLMResponse, tags=["Нейросеть"])
+def llm_endpoint(request: LLMRequest):
+    """
+    Отправляет запрос к LLM API и возвращает ответ.
+    """
+    try:
+        import time
+        
+        start_time = time.time()
+        
+        # Получаем ответ синхронно
+        full_response = generate_response_sync(
+            prompt=request.prompt,
+            model=request.model,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            role=request.role
+        )
+        
+        end_time = time.time()
+        execution_time = end_time - start_time
+        
+        logger.info(f"LLM request completed in {execution_time:.2f} seconds")
+        
+        return LLMResponse(
+            response=full_response,
+            execution_time=execution_time
+        )
+    except Exception as e:
+        logger.error(f"Error in LLM endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing LLM request: {str(e)}")
 
 async def refresh_data_cache():
     """Background task to refresh data cache every 10 minutes"""
