@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
+// Импортируем Recharts для графика аналитики
+// import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 // --- Иконки SVG (можно вынести в отдельный файл, если используются еще где-то) ---
 const IconGear = () => (
@@ -19,6 +21,13 @@ const IconQuestion = () => (
 const IconArrowLeft = () => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 mr-1">
     <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+  </svg>
+);
+
+// Добавим иконку для ссылки на аналитику
+const IconChartBarSquare = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-1.5">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
   </svg>
 );
 
@@ -166,6 +175,16 @@ function LineDetailPage() {
                       Последнее обновление: {new Date(lineData.last_update).toLocaleString()}
                   </p>
                )}
+               {/* Ссылка на страницу аналитики */} 
+               <div className="mt-4">
+                  <Link
+                      to={`/area/${areaName}/analyse`}
+                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-purple-700 bg-purple-100 rounded-md hover:bg-purple-200 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-purple-500"
+                  >
+                     <IconChartBarSquare />
+                     Посмотреть аналитику
+                  </Link>
+               </div>
             </div>
 
             {/* Таблица данных */}

@@ -4,6 +4,7 @@ import axios from 'axios'
 // Импортируем компоненты Recharts
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import LineDetailPage from './LineDetailPage' // Импортируем новую страницу
+import AnalyticsPage from './AnalyticsPage'; // Импортируем новую страницу аналитики
 
 // --- Иконки SVG (оставляем как есть) ---
 const IconGear = () => (
@@ -170,7 +171,7 @@ function DashboardPage() {
                        <ResponsiveContainer>
                            <LineChart 
                              data={chartData}
-                             margin={{ top: 5, right: 10, left: -25, bottom: 0 }} // Настраиваем отступы
+                             margin={{ top: 5, right: 10, left: -15, bottom: 0 }} // Увеличиваем левый отступ
                            >
                                <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" vertical={false} /> {/* Сетка */}
                                <XAxis 
@@ -181,11 +182,12 @@ function DashboardPage() {
                                  interval="preserveStartEnd" // Показываем первый и последний тик
                                />
                                <YAxis 
-                                 tick={{ fontSize: 10, fill: '#6b7280' }} // Стиль тиков оси Y
-                                 axisLine={false} // Убираем линию оси Y
-                                 tickLine={false} // Убираем риски оси Y
+                                 tick={{ fontSize: 11, fill: '#6b7280' }} // Немного увеличим шрифт
+                                 axisLine={{ stroke: '#e0e0e0' }} // Показываем линию оси Y (серая)
+                                 tickLine={{ stroke: '#e0e0e0' }} // Показываем риски оси Y (серые)
                                  domain={['auto', 'auto']} // Автоматический диапазон
-                                 width={30} // Ширина области оси Y
+                                 width={55} // Еще увеличим ширину для значений
+                                 label={{ value: '%', angle: -90, position: 'insideLeft', fill: '#6b7280', fontSize: 12, dx: -10 }} // Добавляем подпись оси
                                />
                                <Tooltip 
                                  contentStyle={{ fontSize: 12, padding: '4px 8px', borderRadius: '4px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} 
@@ -332,6 +334,8 @@ function App() {
       <Route path="/" element={<DashboardPage />} /> 
       {/* Страница деталей линии */} 
       <Route path="/area/:areaName" element={<LineDetailPage />} />
+      {/* Новая страница аналитики */} 
+      <Route path="/area/:areaName/analyse" element={<AnalyticsPage />} /> 
       {/* Можно добавить Route для 404 страницы */}
     </Routes>
   );

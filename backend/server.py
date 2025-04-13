@@ -14,6 +14,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.ext.declarative import declared_attr, declarative_base
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql import func # для func.now() и func.count()
+from sqlalchemy import select # Добавляем select
+from sqlalchemy.exc import OperationalError # Для отлова ошибок блокировки
 
 # FastAPI
 from fastapi import FastAPI, Depends, HTTPException, status, Query # Добавляем Query
@@ -161,29 +163,40 @@ def create_data_model(area_name):
 def get_table_model(table_name: str):
     if table_name in model_cache:
         return model_cache[table_name]
-    
+
     inspector = inspect(engine)
     if not inspector.has_table(table_name):
         logger.warning(f"Попытка получить модель для несуществующей таблицы: {table_name}")
         return None # Возвращаем None если таблицы нет
 
     columns = {column["name"]: column for column in inspector.get_columns(table_name)}
-    
+
     if not columns:
         logger.warning(f"Не удалось получить колонки для существующей таблицы: {table_name}")
         return None
-    
-    class DynamicTable(Base):
-        __tablename__ = table_name
-        __table_args__ = {"extend_existing": True}
-        
-        for col_name, col_info in columns.items():
-            # Используем словарь locals() для динамического добавления атрибутов класса
-            locals()[col_name] = Column(
+
+    # --- ИСПРАВЛЕНИЕ: Используем type() для динамического создания класса ---
+    attrs_dict = {
+        '__tablename__': table_name,
+        '__table_args__': {"extend_existing": True},
+        # Добавляем 'id' колонку явно, если она есть и является primary key
+        # SQLAlchemy может потребовать явное определение PK
+        **{
+            col_name: Column(
                 col_info["type"],
-                primary_key=col_info.get("primary_key", False)
+                primary_key=col_info.get("primary_key", False),
+                # Добавляем index=True для колонки 'Время', если она существует
+                index=(col_name == 'Время')
             )
-    
+            for col_name, col_info in columns.items()
+        }
+    }
+
+    # Создаем класс динамически
+    # Имя класса делаем уникальным, добавляя имя таблицы, чтобы избежать конфликтов
+    DynamicTable = type(f"DynamicTableModel_{table_name}", (Base,), attrs_dict)
+    # ---------------------------------------------------------------------
+
     model_cache[table_name] = DynamicTable
     return DynamicTable
 
@@ -454,6 +467,24 @@ class LineSummaryResponse(BaseModel):
     status: str # Поле уже есть, будет браться из БД
     # Добавляем поле для данных тренда гранулометрии
     granulometry_trend: List[TrendDataPoint] = [] 
+
+# --- Модели для ответа эндпоинта аналитики ---
+class ColumnAnalytics(BaseModel):
+    count: int
+    min: Optional[float] = None
+    max: Optional[float] = None
+    average: Optional[float] = None
+    median: Optional[float] = None
+    std_dev: Optional[float] = None
+
+class AnalyticsResponse(BaseModel):
+    area_name: str
+    start_time: datetime.datetime
+    end_time: datetime.datetime
+    requested_minutes: int
+    statistics: Dict[str, ColumnAnalytics] = {}
+    # Добавляем данные для графиков по ключевым параметрам
+    trends: Dict[str, List[TrendDataPoint]] = {}
 
 # --- API Эндпоинты --- 
 
@@ -897,6 +928,136 @@ async def startup_event():
     logger.info("Приложение запущено.")
     # Убираем фоновую задачу очистки кеша, т.к. модель создается по запросу
     # asyncio.create_task(refresh_data_cache())
+
+# Добавляем импорт numpy
+import numpy as np
+
+# --- Новый эндпоинт для расширенной аналитики --- 
+@app.get('/api/lines/{area_name}/analytics', response_model=AnalyticsResponse, tags=["Аналитика"])
+def get_line_analytics(
+    area_name: str, 
+    minutes: int = Query(60, ge=1, description="Количество последних минут для анализа"),
+    db: Session = Depends(get_db_session)
+):
+    """Получить расширенную аналитику по числовым данным линии за последние N минут."""
+    logger.info(f"Запрос аналитики для линии: {area_name} за последние {minutes} минут.")
+    
+    # 1. Проверяем существование линии
+    line = db.query(MonitoredLine).filter(MonitoredLine.area_name == area_name).first()
+    if not line:
+        logger.warning(f"Линия {area_name} не найдена при запросе аналитики.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Линия '{area_name}' не найдена.")
+
+    # 2. Получаем модель таблицы данных
+    DataModel = get_table_model(area_name)
+    if not DataModel or not hasattr(DataModel, 'Время'):
+        logger.error(f"Не удалось получить модель данных или отсутствует колонка 'Время' для {area_name}.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ошибка структуры таблицы данных для '{area_name}'.")
+
+    # 3. Определяем временной интервал
+    end_time = datetime.datetime.now() # Или можно брать func.now() из БД? Для простоты берем время сервера
+    start_time = end_time - datetime.timedelta(minutes=minutes)
+    logger.debug(f"Интервал для аналитики {area_name}: {start_time} - {end_time}")
+    
+    # 4. Запрашиваем данные за интервал с помощью pd.read_sql_query
+    try:
+        stmt = select(DataModel).where(
+            DataModel.Время >= start_time,
+            DataModel.Время <= end_time
+        ).order_by(DataModel.Время.asc()) # Сортируем по возрастанию для удобства
+
+        # Используем pd.read_sql_query для прямого создания DataFrame
+        # Передаем сам объект statement и подключение SQLAlchemy
+        df = pd.read_sql_query(sql=stmt, con=db.bind) # db.bind - это подключение к БД
+
+        if df.empty:
+             logger.warning(f"Нет данных для линии {area_name} за последние {minutes} минут (используя pd.read_sql_query).")
+             # Возвращаем пустой ответ, но с информацией о запросе
+             return AnalyticsResponse(
+                 area_name=area_name,
+                 start_time=start_time,
+                 end_time=end_time,
+                 requested_minutes=minutes
+             )
+
+        logger.debug(f"Получено {len(df)} строк и {len(df.columns)} колонок из БД для {area_name} с помощью pd.read_sql_query.")
+        logger.debug(f"Размер DataFrame после создания: {df.shape}") # Теперь ожидаем (N, M), где M > 1
+
+    except OperationalError as db_lock_err:
+         logger.error(f"База данных заблокирована при запросе аналитики для {area_name}: {db_lock_err}")
+         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="База данных временно недоступна, попробуйте позже.")
+    except Exception as e:
+        logger.error(f"Ошибка при запросе данных для аналитики {area_name} с pd.read_sql_query: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ошибка получения данных для аналитики: {str(e)}")
+
+    # 5. Рассчитываем статистику для числовых колонок
+    statistics: Dict[str, ColumnAnalytics] = {}
+    numeric_columns = df.select_dtypes(include=np.number).columns
+    # Исключаем 'id', если он есть
+    numeric_columns = [col for col in numeric_columns if col.lower() != 'id'] 
+
+    for col_name in numeric_columns:
+        col_data = pd.to_numeric(df[col_name], errors='coerce').dropna()
+        count = len(col_data)
+        if count > 0:
+            stats = ColumnAnalytics(
+                count=count,
+                min=col_data.min(),
+                max=col_data.max(),
+                average=col_data.mean(),
+                median=col_data.median(),
+                std_dev=col_data.std()
+            )
+        else:
+            stats = ColumnAnalytics(count=0)
+        statistics[col_name] = stats
+        logger.debug(f"Статистика для {area_name} / {col_name}: {stats.dict()}")
+
+    # 6. Подготавливаем данные для трендов для ВСЕХ числовых колонок (кроме id)
+    trends: Dict[str, List[TrendDataPoint]] = {}
+    if 'Время' in df.columns:
+        # Убедимся, что Время - это datetime и оно содержит валидные значения
+        df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
+        df_valid_time = df.dropna(subset=['Время']) # Работаем только со строками с валидным временем
+
+        if not df_valid_time.empty:
+            # Используем список числовых колонок, который мы получили на шаге 5 (numeric_columns)
+            # numeric_columns уже не содержит 'id'
+            for col_name in numeric_columns: # <--- Итерируем по ВСЕМ числовым колонкам
+                if col_name in df_valid_time.columns:
+                    # Берем только валидные числовые значения и время для них
+                    # Используем df_valid_time, чтобы гарантировать наличие валидного 'Время'
+                    trend_df = df_valid_time[['Время', col_name]].copy() # Создаем копию, чтобы избежать SettingWithCopyWarning
+                    trend_df[col_name] = pd.to_numeric(trend_df[col_name], errors='coerce')
+                    trend_df = trend_df.dropna(subset=[col_name]) # Удаляем строки, где значение колонки не числовое
+
+                    if not trend_df.empty:
+                        logger.debug(f"Колонка {col_name}: Найдено {len(trend_df)} валидных точек для тренда.")
+                        trends[col_name] = [
+                            TrendDataPoint(Время=row['Время'].to_pydatetime(), value=row[col_name])
+                            for _, row in trend_df.iterrows()
+                        ]
+                        logger.debug(f"Подготовлено {len(trends[col_name])} точек тренда для {area_name} / {col_name}.")
+                    else:
+                         logger.debug(f"Колонка {col_name}: Не найдено валидных числовых точек для тренда после очистки.")
+                # else: # Это условие теперь не нужно, т.к. numeric_columns гарантированно есть в df
+                #    logger.warning(f"Колонка {col_name} для тренда не найдена в данных {area_name}.")
+        else:
+             logger.warning(f"Нет строк с валидным временем для подготовки трендов в {area_name}.")
+    else:
+        logger.error(f"Критическая ошибка: Колонка 'Время' отсутствует в DataFrame для {area_name}, тренды не могут быть созданы.")
+
+    # 7. Формируем и возвращаем ответ
+    response_data = AnalyticsResponse(
+        area_name=area_name,
+        start_time=df['Время'].min() if 'Время' in df and not df['Время'].empty else start_time, # Фактическое начало данных
+        end_time=df['Время'].max() if 'Время' in df and not df['Время'].empty else end_time,       # Фактическое окончание данных
+        requested_minutes=minutes,
+        statistics=statistics,
+        trends=trends
+    )
+    logger.info(f"Аналитика для {area_name} успешно рассчитана.")
+    return response_data
 
 
 if __name__ == '__main__':
