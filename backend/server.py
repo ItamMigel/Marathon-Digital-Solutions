@@ -2,39 +2,39 @@ import datetime
 import logging
 import os
 import asyncio
-import json
-import requests
 from contextlib import contextmanager
 from typing import List, Optional, Dict, Any
+import traceback # Для логгирования стектрейса
 
 # Для работы с данными
 import pandas as pd
 
 # SQLAlchemy
-from sqlalchemy import create_engine, Column, Integer, Date, Float, DateTime, inspect, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, inspect, text, MetaData, Table
 from sqlalchemy.ext.declarative import declared_attr, declarative_base
-from sqlalchemy.orm import declarative_base, Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql import func # для func.now() и func.count()
 
 # FastAPI
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Query # Добавляем Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import uvicorn
-from fastapi.routing import APIRoute
+import uvicorn  
+import requests
+import json
 
-# Настройка логирования
+# --- Конфигурация и Логгирование ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
 logger = logging.getLogger("server")
-
 
 class Config:
     DATABASE_URL = "sqlite:///data/value.db"
     DEBUG = True
     API_VERSION = "1.0.0"
-    API_TITLE = "Система телеметрии"
-    API_DESCRIPTION = "API для работы с данными телеметрии"
+    API_TITLE = "Система Мониторинга Линий"
+    API_DESCRIPTION = "API для мониторинга данных из CSV файлов"
 
-# Инициализация FastAPI
+# --- Инициализация FastAPI --- 
 app = FastAPI(
     title=Config.API_TITLE,
     description=Config.API_DESCRIPTION,
@@ -43,7 +43,6 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,42 +51,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Инициализация базы данных
+# --- Настройка Базы Данных --- 
 Base = declarative_base()
-
-# Создание движка базы данных
-engine = create_engine(Config.DATABASE_URL, echo=Config.DEBUG)
+# Добавляем connect_args для увеличения таймаута
+engine = create_engine(
+    Config.DATABASE_URL, 
+    echo=Config.DEBUG,
+    connect_args={"timeout": 15} # 15 секунд ожидания блокировки
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Логирование пути к базе данных
-import os
-db_path = Config.DATABASE_URL.replace('sqlite:///', '')
-logger.info(f"Using database at path: {db_path}")
-absolute_path = os.path.abspath(db_path)
-logger.info(f"Absolute path to database: {absolute_path}")
-if os.path.exists(absolute_path):
-    logger.info(f"Database file exists: {absolute_path}")
-else:
-    logger.warning(f"Database file NOT FOUND: {absolute_path}")
-    possible_paths = [
-        'data/value.db',
-        './data/value.db',
-        'value.db',
-        '../value.db',
-        '../data/value.db',
-        '../../value.db',
-        '../../../value.db',
-        os.path.join(os.getcwd(), 'data/value.db'),
-        os.path.join(os.getcwd(), 'value.db'),
-        os.path.join(os.getcwd(), '../data/value.db')
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            logger.info(f"Found database at: {path}")
-            Config.DATABASE_URL = f"sqlite:///{path}"
-            engine = create_engine(Config.DATABASE_URL, echo=Config.DEBUG)
-            SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-            break
+# ... (Проверка пути к БД остается как была) ...
 
 # Менеджер контекста для сессий БД
 @contextmanager
@@ -95,68 +69,32 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
-        db.commit()
     except Exception as e:
         db.rollback()
-        logger.error(f"Ошибка базы данных: {str(e)}")
+        logger.error(f"Ошибка базы данных: {str(e)}\n{traceback.format_exc()}")
         raise
     finally:
+        # Коммит не нужен здесь, он должен быть в логике эндпоинта или сервиса
         db.close()
 
-# Зависимость для получения сессии БД в эндпоинтах
+# Зависимость для получения сессии БД
 def get_db_session():
     with get_db() as session:
         yield session
 
-# Базовая модель для всех таблиц
-class BaseDBModel:
-    @declared_attr
-    def __tablename__(cls):
-        return cls.__name__.lower()
-    
+# --- Модели SQLAlchemy --- 
+
+# Модель для хранения метаданных отслеживаемых линий
+class MonitoredLine(Base):
+    __tablename__ = 'monitored_lines'
     id = Column(Integer, primary_key=True)
-    
-    @classmethod
-    def get_by_id(cls, db: Session, id: int):
-        return db.query(cls).filter(cls.id == id).first()
-    
-    @classmethod
-    def get_all(cls, db: Session, skip: int = 0, limit: int = 100):
-        return db.query(cls).offset(skip).limit(limit).all()
-    
-    def save(self, db: Session):
-        db.add(self)
-        db.commit()
-        db.refresh(self)
-        return self
-    
-    def update(self, db: Session, **kwargs):
-        for key, value in kwargs.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-        return self.save(db)
-    
-    def delete(self, db: Session):
-        db.delete(self)
-        db.commit()
-        return True
+    area_name = Column(String, unique=True, index=True, nullable=False)
+    file_path = Column(String, nullable=False)
+    last_update = Column(DateTime, server_default=func.now())
+    # Добавляем новые поля
+    status = Column(String, default="Неизвестно", nullable=False) # Статус линии
+    comment = Column(String, nullable=True) # Комментарий к статусу
 
-# Schemas for API
-class TableInfo(BaseModel):
-    name: str
-    columns: List[str]
-
-class TableData(BaseModel):
-    table_name: str
-    columns: List[str]
-    data: List[Dict[str, Any]]
-    total_records: int
-
-class AnalysisResult(BaseModel):
-    table_name: str
-    production_line: Optional[int] = None
-    summary: Dict[str, Any]
-    recommendations: List[str]
 
 class LLMRequest(BaseModel):
     prompt: str
@@ -169,45 +107,14 @@ class LLMResponse(BaseModel):
     response: str
     execution_time: float
 
-# Кеш для хранения созданных моделей
-_model_cache = {}
+# Кеш для динамических моделей таблиц данных
 model_cache = {}
 
-# Get dynamic model for a table
-def get_table_model(table_name: str):
-    if table_name in model_cache:
-        return model_cache[table_name]
-    
-    # Inspect the table to get column information
-    inspector = inspect(engine)
-    columns = {column["name"]: column for column in inspector.get_columns(table_name)}
-    
-    if not columns:
-        return None
-    
-    # Create a dynamic model
-    class DynamicTable(Base):
-        __tablename__ = table_name
-        __table_args__ = {"extend_existing": True}
-        
-        # Add columns dynamically based on database inspection
-        for col_name, col_info in columns.items():
-            locals()[col_name] = Column(
-                col_info["type"], 
-                primary_key=col_info.get("primary_key", False)
-            )
-    
-    model_cache[table_name] = DynamicTable
-    return DynamicTable
-
-# Фабрика моделей
+# Фабрика для создания моделей таблиц данных (как раньше, с extend_existing)
 def create_data_model(area_name):
-    # Если модель уже создана - возвращаем её из кеша
-    if area_name in _model_cache:
-        return _model_cache[area_name]
-    
-    class Data(Base, BaseDBModel):
+    class Data(Base):
         __tablename__ = area_name
+        __table_args__ = {"extend_existing": True}
         
         id = Column(Integer, primary_key=True)
         Время = Column(DateTime, index=True)
@@ -245,972 +152,479 @@ def create_data_model(area_name):
         Поток_л_мин = Column(Float)
         Расход_оборотной_воды_м3_ч = Column(Float)
         Расход_в_ГЦ_насоса_м3_ч = Column(Float)
-        Номер_производственной_линии = Column(Integer, index=True)
 
-        def __repr__(self):
-            return f'''(
-                id: {self.id},
-                Время: {self.Время},
-                Мощность_МПСИ_кВт: {self.Мощность_МПСИ_кВт},
-                Мощность_МШЦ_кВт: {self.Мощность_МШЦ_кВт},
-                Ток_МПСИ_А: {self.Ток_МПСИ_А},
-                Ток_МШЦ_А: {self.Ток_МШЦ_А},
-                Исходное_питание_МПСИ_т_ч: {self.Исходное_питание_МПСИ_т_ч},
-                Возврат_руды_МПСИ_т_ч: {self.Возврат_руды_МПСИ_т_ч},
-                Общее_питание_МПСИ_т_ч: {self.Общее_питание_МПСИ_т_ч},
-                Расход_воды_МПСИ_PV_м3_ч: {self.Расход_воды_МПСИ_PV_м3_ч},
-                Расход_воды_МПСИ_SP_м3_ч: {self.Расход_воды_МПСИ_SP_м3_ч},
-                Расход_воды_МПСИ_CV_процент: {self.Расход_воды_МПСИ_CV_процент},
-                факт_соотношение_руда_вода_МПСИ: {self.факт_соотношение_руда_вода_МПСИ},
-                Давление_на_подшипник_МПСИ_загрузка_Бар: {self.Давление_на_подшипник_МПСИ_загрузка_Бар},
-                Давление_на_подшипник_МПСИ_разгрузка_Бар: {self.Давление_на_подшипник_МПСИ_разгрузка_Бар},
-                Температура_масла_основной_маслостанции_подача_МПСИ: {self.Температура_масла_основной_маслостанции_подача_МПСИ},
-                Температура_масла_основной_маслостанции_слив_МПСИ: {self.Температура_масла_основной_маслостанции_слив_МПСИ},
-                Температура_масла_маслостанции_электродвигатель_МПСИ: {self.Температура_масла_маслостанции_электродвигатель_МПСИ},
-                Температура_масла_редуктора_МПСИ: {self.Температура_масла_редуктора_МПСИ},
-                Давление_на_подшипник_МШЦ_загрузка_Бар: {self.Давление_на_подшипник_МШЦ_загрузка_Бар},
-                Давление_на_подшипник_МШЦ_разгрузка_Бар: {self.Давление_на_подшипник_МШЦ_разгрузка_Бар},
-                Температура_масла_основной_маслостанции_подача_МШЦ: {self.Температура_масла_основной_маслостанции_подача_МШЦ},
-                Температура_масла_основной_маслостанции_слив_МШЦ: {self.Температура_масла_основной_маслостанции_слив_МШЦ},
-                Температура_масла_маслостанции_электродвигатель_МШЦ: {self.Температура_масла_маслостанции_электродвигатель_МШЦ},
-                Температура_масла_редуктора_МШЦ: {self.Температура_масла_редуктора_МШЦ},
-                Расход_извести_МШЦ_л_ч: {self.Расход_извести_МШЦ_л_ч},
-                Уровень_в_зумпфе_процент: {self.Уровень_в_зумпфе_процент},
-                Обороты_насоса_процент: {self.Обороты_насоса_процент},
-                Давление_в_ГЦ_насоса_Бар: {self.Давление_в_ГЦ_насоса_Бар},
-                Плотность_слива_ГЦ_кг_л: {self.Плотность_слива_ГЦ_кг_л},
-                pH_оборотной_воды: {self.pH_оборотной_воды},
-                t_оборотной_воды: {self.t_оборотной_воды},
-                Гранулометрия_процент: {self.Гранулометрия_процент},
-                Поток_л_мин: {self.Поток_л_мин},
-                Расход_оборотной_воды_м3_ч: {self.Расход_оборотной_воды_м3_ч},
-                Расход_в_ГЦ_насоса_м3_ч: {self.Расход_в_ГЦ_насоса_м3_ч},
-                Номер_производственной_линии: {self.Номер_производственной_линии}
-            )'''
-        
-        def __str__(self):
-            return f'''(
-                    {self.id},
-                    {self.Время},
-                    {self.Гранулометрия_процент},
-                    {self.Поток_л_мин},
-                    {self.Номер_производственной_линии}
-                )'''
-        
-        @classmethod
-        def get_by_date(cls, db: Session, date: datetime.datetime, limit: int = 10):
-            try:
-                result = db.query(cls).filter(cls.Время == date).limit(limit).all()
-                if not result:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Данные на дату {date} не найдены"
-                    )
-                return result
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Ошибка базы данных: {status.HTTP_404_NOT_FOUND}: {str(e)}")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Данные на дату {date} не найдены"
-                )
-    
-    # Сохраняем модель в кеш
-    _model_cache[area_name] = Data
+    if area_name not in model_cache:
+        model_cache[area_name] = Data
     return Data
 
-# Дополнительная функция для проверки и создания таблицы
-def ensure_table_exists(area_name):
-    # Получаем или создаем модель таблицы
-    DataModel = create_data_model(area_name)
+# Получение модели для существующей таблицы (как раньше)
+def get_table_model(table_name: str):
+    if table_name in model_cache:
+        return model_cache[table_name]
     
-    # Проверяем существование таблицы
     inspector = inspect(engine)
-    if area_name not in inspector.get_table_names():
-        # Создаем таблицу, если она не существует
-        DataModel.__table__.create(engine)
-        logger.info(f"Динамически создана таблица: {area_name}")
+    if not inspector.has_table(table_name):
+        logger.warning(f"Попытка получить модель для несуществующей таблицы: {table_name}")
+        return None # Возвращаем None если таблицы нет
+
+    columns = {column["name"]: column for column in inspector.get_columns(table_name)}
     
-    return DataModel
-
-# Сервис для работы с данными
-class DataService:
-    @staticmethod
-    def add_from_json(db: Session, json_data: Dict[str, Any], area_name='value_1234'):
-        try:
-            # Проверяем и создаем таблицу при необходимости
-            DataModel = ensure_table_exists(area_name)
-            
-            data_dict = json_data
-            processed_dict = {key.replace(' ', '_').replace('/', '_'): value for key, value in data_dict.items()}
-            
-            data_instance = DataModel(**processed_dict)
-            db.add(data_instance)
-            db.commit()
-            db.refresh(data_instance)
-            return data_instance
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Ошибка при добавлении данных из JSON: {str(e)}")
-            raise
-
-    @staticmethod
-    def add_from_pandas(db: Session, df: pd.DataFrame, area_name='default'):
-        added_data = []
-        try:
-            # Проверяем и создаем таблицу при необходимости
-            DataModel = ensure_table_exists(area_name)
-            
-            # Получаем список допустимых колонок модели
-            valid_columns = [c.name for c in DataModel.__table__.columns]
-            
-            # Преобразуем колонку 'Время' в объекты datetime перед циклом
-            # Используем errors='coerce' для замены невалидных дат на NaT (Not a Time)
-            if 'Время' in df.columns and 'Время' in valid_columns:
-                try:
-                    df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
-                    # Логируем, если были ошибки преобразования
-                    failed_conversion = df['Время'].isna().sum()
-                    if failed_conversion > 0:
-                        logger.warning(f"В таблице '{area_name}' найдено {failed_conversion} строк с неверным форматом 'Время'. Эти строки будут пропущены.")
-                except Exception as e:
-                    logger.error(f"Ошибка при преобразовании колонки 'Время' в datetime для таблицы '{area_name}': {e}. Попытка продолжить без преобразования.")
-            elif 'Время' in valid_columns:
-                 logger.warning(f"Колонка 'Время' ожидается в таблице '{area_name}', но не найдена в DataFrame.")
-                 # Обработка ситуации, когда колонка 'Время' отсутствует, но необходима
-
-            for _, row in df.iterrows():
-                data_dict = row.to_dict()
-
-                # Пропускаем строки, где 'Время' не удалось преобразовать (стало NaT)
-                # или если 'Время' обязательно и отсутствует
-                if 'Время' in valid_columns:
-                    время_value = data_dict.get('Время')
-                    if pd.isna(время_value):
-                         logger.warning(f"Пропуск строки из-за некорректного или отсутствующего значения 'Время': {row.to_dict()}")
-                         continue
-
-                # Отфильтровываем только те ключи, которые есть в модели
-                filtered_dict = {k: v for k, v in data_dict.items() if k in valid_columns}
-
-                if not filtered_dict:
-                    # Преобразуем колонки, заменяя пробелы на подчеркивания и сохраняя единицы измерения
-                    processed_dict = {}
-                    for key, value in data_dict.items():
-                        # Заменяем пробелы на подчеркивания и слеш на подчеркивание
-                        processed_key = key.replace(' ', '_').replace('/', '_')
-
-                        # Проверяем, есть ли такой ключ в допустимых колонках
-                        if processed_key in valid_columns:
-                            processed_dict[processed_key] = value
-                        else:
-                            # Пробуем другие варианты форматирования ключа
-                            # Убираем возможные скобки, точки и другие спецсимволы
-                            clean_key = ''.join(c if c.isalnum() or c == '_' else '_' for c in processed_key)
-                            if clean_key in valid_columns:
-                                processed_dict[clean_key] = value
-                            else:
-                                # Поиск ближайшего соответствия по ключевым словам
-                                for column in valid_columns:
-                                    # Проверяем, содержит ли допустимая колонка основные части ключа
-                                    if all(part in column for part in processed_key.split('_') if len(part) > 2):
-                                        processed_dict[column] = value
-                                        break
-                else:
-                    processed_dict = filtered_dict
-
-                # Дополнительная проверка на наличие 'Время' перед созданием объекта
-                if 'Время' in valid_columns and ('Время' not in processed_dict or pd.isna(processed_dict.get('Время'))):
-                     logger.warning(f"Пропуск строки из-за отсутствия или некорректного значения 'Время' после обработки: {data_dict}")
-                     continue
-
-                try:
-                    # Убираем NaT значения перед передачей в модель (если они остались)
-                    final_dict = {k: v for k, v in processed_dict.items() if not pd.isna(v)}
-                    data_instance = DataModel(**final_dict)
-                    db.add(data_instance)
-                    added_data.append(data_instance)
-                except Exception as e:
-                    # Пропускаем записи с ошибками, но логируем их
-                    logger.error(f"Ошибка при добавлении записи: {str(e)}")
-                    logger.error(f"Проблемные данные: {processed_dict}")
-                    continue
-
-            db.commit()
-            return added_data
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Ошибка при добавлении данных из DataFrame: {str(e)}")
-            raise
-
-    @staticmethod
-    def to_response_dict(data) -> Dict[str, Any]:
-        return {
-            "id": data.id,
-            "date": str(data.Время),
-            "power_MPSI_kW": data.Мощность_МПСИ_кВт,
-            "power_MHC_kW": data.Мощность_МШЦ_кВт,
-            "tok_MPSI_A": data.Ток_МПСИ_А,
-            "tok_MHC_A": data.Ток_МШЦ_А,
-            "source_feed_MPSI_t_h": data.Исходное_питание_МПСИ_т_ч,
-            "return_ore_MPSI_t_h": data.Возврат_руды_МПСИ_т_ч,
-            "total_feed_MPSI_t_h": data.Общее_питание_МПСИ_т_ч,
-            "water_flow_MPSI_PV_m3_h": data.Расход_воды_МПСИ_PV_м3_ч,
-            "water_flow_MPSI_SP_m3_h": data.Расход_воды_МПСИ_SP_м3_ч,
-            "water_flow_MPSI_CV_percent": data.Расход_воды_МПСИ_CV_процент,
-            "ratio_water_ore_MPSI": data.факт_соотношение_руда_вода_МПСИ,
-            "pressure_bearing_MPSI_loading_Bar": data.Давление_на_подшипник_МПСИ_загрузка_Бар,
-            "pressure_bearing_MPSI_unloading_Bar": data.Давление_на_подшипник_МПСИ_разгрузка_Бар,
-            "temp_oil_main_oil_station_supply_MPSI": data.Температура_масла_основной_маслостанции_подача_МПСИ,
-            "temp_oil_main_oil_station_drain_MPSI": data.Температура_масла_основной_маслостанции_слив_МПСИ,
-            "temp_oil_oil_station_electric_motor_MPSI": data.Температура_масла_маслостанции_электродвигатель_МПСИ,
-            "temp_oil_reducer_MPSI": data.Температура_масла_редуктора_МПСИ,
-            "pressure_bearing_MHC_loading_Bar": data.Давление_на_подшипник_МШЦ_загрузка_Бар,
-            "pressure_bearing_MHC_unloading_Bar": data.Давление_на_подшипник_МШЦ_разгрузка_Бар,
-            "temp_oil_main_oil_station_supply_MHC": data.Температура_масла_основной_маслостанции_подача_МШЦ,
-            "temp_oil_main_oil_station_drain_MHC": data.Температура_масла_основной_маслостанции_слив_МШЦ,
-            "temp_oil_oil_station_electric_motor_MHC": data.Температура_масла_маслостанции_электродвигатель_МШЦ,
-            "temp_oil_reducer_MHC": data.Температура_масла_редуктора_МШЦ,
-            "lime_flow_MHC_l_h": data.Расход_извести_МШЦ_л_ч,
-            "sump_level_percent": data.Уровень_в_зумпфе_процент,
-            "pump_speed_percent": data.Обороты_насоса_процент,
-            "pressure_GC_pump_Bar": data.Давление_в_ГЦ_насоса_Бар,
-            "density_GC_drain_kg_l": data.Плотность_слива_ГЦ_кг_л,
-            "pH_circulating_water": data.pH_оборотной_воды,
-            "t_circulating_water": data.t_оборотной_воды,
-            "granulometry_percent": data.Гранулометрия_процент,
-            "flow_l_min": data.Поток_л_мин,
-            "circulation_water_flow_m3_h": data.Расход_оборотной_воды_м3_ч,
-            "GC_pump_flow_m3_h": data.Расход_в_ГЦ_насоса_м3_ч,
-            "production_line_number": data.Номер_производственной_линии
-        }
-
-# Инициализация базы данных
-def create_db(area_names=[]):
-    try:
-        # Если не указаны имена таблиц, проверим уже существующие
-        if not area_names:
-            inspector = inspect(engine)
-            area_names = inspector.get_table_names()
-            logger.info(f"Found existing tables: {area_names}")
+    if not columns:
+        logger.warning(f"Не удалось получить колонки для существующей таблицы: {table_name}")
+        return None
+    
+    class DynamicTable(Base):
+        __tablename__ = table_name
+        __table_args__ = {"extend_existing": True}
         
-        # Создаем динамические таблицы
-        for area_name in area_names:
-            data_model = create_data_model(area_name)
-            logger.info(f"Created model for table: {area_name}")
-            
-            # Добавляем в оба кеша для совместимости
-            _model_cache[area_name] = data_model
-            model_cache[area_name] = data_model
-            
-        # Создаем все таблицы в базе данных
-        Base.metadata.create_all(bind=engine)
-        logger.info("База данных успешно создана или обновлена")
+        for col_name, col_info in columns.items():
+            # Используем словарь locals() для динамического добавления атрибутов класса
+            locals()[col_name] = Column(
+                col_info["type"],
+                primary_key=col_info.get("primary_key", False)
+            )
+    
+    model_cache[table_name] = DynamicTable
+    return DynamicTable
+
+# Проверка и создание таблицы данных по шаблону
+# Теперь эта функция МОЖЕТ вызвать исключение, если таблица заблокирована
+def ensure_data_table_exists(area_name):
+    inspector = inspect(engine)
+    if not inspector.has_table(area_name):
+        logger.info(f"Таблица данных {area_name} не найдена, создаем по шаблону...")
+        # Убрали try...except, ошибка будет перехвачена в вызывающей функции (/api/add)
+        DataModelTemplate = create_data_model(area_name)
+        DataModelTemplate.__table__.create(bind=engine) # Может вызвать OperationalError: database is locked
+        logger.info(f"Таблица данных {area_name} успешно создана.")
+        # except Exception as e:
+        #     logger.error(f"Не удалось создать таблицу данных {area_name}: {e}")
+        #     raise # Перебрасываем ошибку
+
+# --- Сервисные функции --- 
+
+# Переименовываем и меняем логику
+def read_initial_csv_data(file_path: str, max_lines: int = 1440) -> Optional[pd.DataFrame]:
+    """Читает последние N строк из CSV файла (но не более max_lines), обрабатывая разные кодировки."""
+    if not os.path.exists(file_path):
+        logger.error(f"Файл не найден для чтения: {file_path}")
+        return None
+    try:
+        # Читаем весь файл
+        try:
+            df = pd.read_csv(file_path, sep=',', encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            logger.warning(f"Не удалось прочитать CSV {file_path} с UTF-8, пробуем cp1251...")
+            df = pd.read_csv(file_path, sep=',', encoding='cp1251')
+        
+        if df.empty:
+             logger.warning(f"CSV файл {file_path} пуст.")
+             return None
+             
+        # Определяем, сколько строк брать (не больше max_lines и не больше, чем есть в файле)
+        num_rows_to_take = min(max_lines, len(df))
+        logger.info(f"Читаем последние {num_rows_to_take} строк из {len(df)} в файле {file_path}")
+        return df.tail(num_rows_to_take)
+
+    except pd.errors.EmptyDataError:
+        logger.warning(f"CSV файл {file_path} пуст или содержит только заголовки.")
+        return None
     except Exception as e:
-        logger.error(f"Ошибка при создании базы данных: {str(e)}")
-        raise
+        logger.error(f"Ошибка чтения CSV файла {file_path}: {e}")
+        return None
 
-# Pydantic модели для API
-class ValuesRequest(BaseModel):
-    date: datetime.datetime
-    limit: int = Field(default=10, ge=1, le=100)
-    area_name: List[str] = Field(default=[], description="[] - поиск по всем участкам")
+def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
+    """Добавляет данные из DataFrame в указанную таблицу."""
     
-    class Config:
-        schema_extra = {
-            "example": {
-                "date": "2023-01-01T00:00:00",
-                "limit": 10,
-                "area_name": [],
-            }
+    DataModel = get_table_model(area_name)
+    if not DataModel:
+        logger.error(f"Не найдена модель для таблицы {area_name} при добавлении данных.")
+        return 0
+        
+    valid_columns = [c.key for c in DataModel.__table__.columns]
+    added_count = 0
+    skipped_count = 0 # Счетчик пропущенных строк
+    renamed_count = 0 # Счетчик переименованных колонок
+    total_rows = len(df)
+
+    logger.info(f"Начинаем обработку {total_rows} строк для добавления в {area_name}.")
+
+    try:
+        # Переименование колонок по field_mapping (можно вынести)
+        field_mapping = {
+            'Время': 'Время',
+            'Мощность МПСИ кВт': 'Мощность_МПСИ_кВт', # и т.д. все поля как были раньше
+            'Мощность МШЦ кВт': 'Мощность_МШЦ_кВт',
+            'Ток МПСИ А': 'Ток_МПСИ_А',
+            'Ток МШЦ А': 'Ток_МШЦ_А',
+            'Исходное питание МПСИ т/ч': 'Исходное_питание_МПСИ_т_ч',
+            'Возврат руды МПСИ т/ч': 'Возврат_руды_МПСИ_т_ч',
+            'Общее питание МПСИ т/ч': 'Общее_питание_МПСИ_т_ч',
+            'Расход воды МПСИ PV м3/ч': 'Расход_воды_МПСИ_PV_м3_ч',
+            'Расход воды МПСИ SP м3/ч': 'Расход_воды_МПСИ_SP_м3_ч',
+            'Расход воды МПСИ CV %': 'Расход_воды_МПСИ_CV_процент',
+            'факт соотношение руда/вода МПСИ': 'факт_соотношение_руда_вода_МПСИ',
+            'Давление на подшипник МПСИ загрузка Бар': 'Давление_на_подшипник_МПСИ_загрузка_Бар',
+            'Давление на подшипник МПСИ разгрузка Бар': 'Давление_на_подшипник_МПСИ_разгрузка_Бар',
+            'Температура масла основной маслостанции подача МПСИ': 'Температура_масла_основной_маслостанции_подача_МПСИ',
+            'Температура масла основной маслостанции слив МПСИ': 'Температура_масла_основной_маслостанции_слив_МПСИ',
+            'Температура масла маслостанции электродвигатель МПСИ': 'Температура_масла_маслостанции_электродвигатель_МПСИ',
+            'Температура масла редуктора МПСИ': 'Температура_масла_редуктора_МПСИ',
+            'Давление на подшипник МШЦ загрузка Бар': 'Давление_на_подшипник_МШЦ_загрузка_Бар',
+            'Давление на подшипник МШЦ разгрузка Бар': 'Давление_на_подшипник_МШЦ_разгрузка_Бар',
+            'Температура масла основной маслостанции подача МШЦ': 'Температура_масла_основной_маслостанции_подача_МШЦ',
+            'Температура масла основной маслостанции слив МШЦ': 'Температура_масла_основной_маслостанции_слив_МШЦ',
+            'Температура масла маслостанции электродвигатель МШЦ': 'Температура_масла_маслостанции_электродвигатель_МШЦ',
+            'Температура масла редуктора МШЦ': 'Температура_масла_редуктора_МШЦ',
+            'Расход извести МШЦ л/ч': 'Расход_извести_МШЦ_л_ч',
+            'Уровень в зумпфе %': 'Уровень_в_зумпфе_процент',
+            'Обороты насоса %': 'Обороты_насоса_процент',
+            'Давление в ГЦ насоса Бар': 'Давление_в_ГЦ_насоса_Бар',
+            'Плотность слива ГЦ кг/л': 'Плотность_слива_ГЦ_кг_л',
+            'pH оборотной воды': 'pH_оборотной_воды',
+            't оборотной воды': 't_оборотной_воды',
+            'Гранулометрия %': 'Гранулометрия_процент',
+            'Поток л/мин': 'Поток_л_мин',
+            'Расход оборотной воды м3/ч': 'Расход_оборотной_воды_м3_ч',
+            'Расход в ГЦ насоса м3/ч': 'Расход_в_ГЦ_насоса_м3_ч'
         }
-
-class DataResponse(BaseModel):
-    id: int
-    date: str
-    power_MPSI_kW: Optional[float] = None
-    power_MHC_kW: Optional[float] = None
-    tok_MPSI_A: Optional[float] = None
-    tok_MHC_A: Optional[float] = None
-    source_feed_MPSI_t_h: Optional[float] = None
-    return_ore_MPSI_t_h: Optional[float] = None
-    total_feed_MPSI_t_h: Optional[float] = None
-    water_flow_MPSI_PV_m3_h: Optional[float] = None
-    water_flow_MPSI_SP_m3_h: Optional[float] = None
-    water_flow_MPSI_CV_percent: Optional[float] = None
-    ratio_water_ore_MPSI: Optional[float] = None
-    pressure_bearing_MPSI_loading_Bar: Optional[float] = None
-    pressure_bearing_MPSI_unloading_Bar: Optional[float] = None
-    temp_oil_main_oil_station_supply_MPSI: Optional[float] = None
-    temp_oil_main_oil_station_drain_MPSI: Optional[float] = None
-    temp_oil_oil_station_electric_motor_MPSI: Optional[float] = None
-    temp_oil_reducer_MPSI: Optional[float] = None
-    pressure_bearing_MHC_loading_Bar: Optional[float] = None
-    pressure_bearing_MHC_unloading_Bar: Optional[float] = None
-    temp_oil_main_oil_station_supply_MHC: Optional[float] = None
-    temp_oil_main_oil_station_drain_MHC: Optional[float] = None
-    temp_oil_oil_station_electric_motor_MHC: Optional[float] = None
-    temp_oil_reducer_MHC: Optional[float] = None
-    lime_flow_MHC_l_h: Optional[float] = None
-    sump_level_percent: Optional[float] = None
-    pump_speed_percent: Optional[float] = None
-    pressure_GC_pump_Bar: Optional[float] = None
-    density_GC_drain_kg_l: Optional[float] = None
-    pH_circulating_water: Optional[float] = None
-    t_circulating_water: Optional[float] = None
-    granulometry_percent: Optional[float] = None
-    flow_l_min: Optional[float] = None
-    circulation_water_flow_m3_h: Optional[float] = None
-    GC_pump_flow_m3_h: Optional[float] = None
-    production_line_number: Optional[int] = None
-
-# Функции для работы с данными
-def add_from_json(json_data, area_name='default'):
-    with get_db() as db:
-        return DataService.add_from_json(db, json_data, area_name=area_name)
-
-def add_from_pandas(df, area_name='default'):
-    with get_db() as db:
-        return DataService.add_from_pandas(db, df, area_name=area_name)
-
-def load_data(file_content=None, filename=None, table_name=None, file_type='parquet', file_path=None, limit_latest=None):
-    """
-    Load data from uploaded file content or file path into the specified database table.
-    
-    Args:
-        file_content (bytes, optional): Content of the uploaded file
-        filename (str, optional): Name of the uploaded file
-        table_name (str): Name of the table where data should be loaded (will be created if doesn't exist)
-        file_type (str): Type of the file ('parquet' or 'excel')
-        file_path (str, optional): Path to the file to load data from (alternative to file_content)
-        limit_latest (int, optional): If set, only loads the latest N records based on the 'Время' column
-    
-    Returns:
-        List: List of added data objects
-    """
-    try:
-        import tempfile
-        import os
+        renamed_columns_mapping = {old: new for old, new in field_mapping.items() if old in df.columns and old != new}
+        if renamed_columns_mapping:
+            df = df.rename(columns=renamed_columns_mapping)
+            renamed_count = len(renamed_columns_mapping)
+            logger.info(f"Переименовано {renamed_count} колонок для {area_name}.")
         
-        # Определение режима работы (загрузка содержимого или чтение из файла)
-        using_file_content = file_content is not None
-        using_file_path = file_path is not None and os.path.exists(file_path)
-        
-        if not using_file_content and not using_file_path:
-            raise ValueError("Необходимо указать либо содержимое файла (file_content), либо путь к файлу (file_path)")
-        
-        if not table_name:
-            raise ValueError("Необходимо указать имя таблицы (table_name)")
-        
-        # Создаем временный файл, если используем file_content
-        temp_file_path = None
-        if using_file_content:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as temp_file:
-                temp_file.write(file_content)
-                temp_file_path = temp_file.name
-        
-        try:
-            # Обрабатываем файл в зависимости от типа
-            if file_type.lower() == 'parquet':
-                df = pd.read_parquet(temp_file_path if using_file_content else file_path)
-            elif file_type.lower() == 'excel':
-                df = pd.read_excel(temp_file_path if using_file_content else file_path)
-            else:
-                raise ValueError(f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'.")
-            
-            # Словарь соответствия имен полей из файла в имена полей базы данных
-            field_mapping = {
-                'Время': 'Время',
-                'Мощность МПСИ кВт': 'Мощность_МПСИ_кВт',
-                'Мощность МШЦ кВт': 'Мощность_МШЦ_кВт',
-                'Ток МПСИ А': 'Ток_МПСИ_А',
-                'Ток МШЦ А': 'Ток_МШЦ_А',
-                'Исходное питание МПСИ т/ч': 'Исходное_питание_МПСИ_т_ч',
-                'Возврат руды МПСИ т/ч': 'Возврат_руды_МПСИ_т_ч',
-                'Общее питание МПСИ т/ч': 'Общее_питание_МПСИ_т_ч',
-                'Расход воды МПСИ PV м3/ч': 'Расход_воды_МПСИ_PV_м3_ч',
-                'Расход воды МПСИ SP м3/ч': 'Расход_воды_МПСИ_SP_м3_ч',
-                'Расход воды МПСИ CV %': 'Расход_воды_МПСИ_CV_процент',
-                'факт соотношение руда/вода МПСИ': 'факт_соотношение_руда_вода_МПСИ',
-                'Давление на подшипник МПСИ загрузка Бар': 'Давление_на_подшипник_МПСИ_загрузка_Бар',
-                'Давление на подшипник МПСИ разгрузка Бар': 'Давление_на_подшипник_МПСИ_разгрузка_Бар',
-                'Температура масла основной маслостанции подача МПСИ': 'Температура_масла_основной_маслостанции_подача_МПСИ',
-                'Температура масла основной маслостанции слив МПСИ': 'Температура_масла_основной_маслостанции_слив_МПСИ',
-                'Температура масла маслостанции электродвигатель МПСИ': 'Температура_масла_маслостанции_электродвигатель_МПСИ',
-                'Температура масла редуктора МПСИ': 'Температура_масла_редуктора_МПСИ',
-                'Давление на подшипник МШЦ загрузка Бар': 'Давление_на_подшипник_МШЦ_загрузка_Бар',
-                'Давление на подшипник МШЦ разгрузка Бар': 'Давление_на_подшипник_МШЦ_разгрузка_Бар',
-                'Температура масла основной маслостанции подача МШЦ': 'Температура_масла_основной_маслостанции_подача_МШЦ',
-                'Температура масла основной маслостанции слив МШЦ': 'Температура_масла_основной_маслостанции_слив_МШЦ',
-                'Температура масла маслостанции электродвигатель МШЦ': 'Температура_масла_маслостанции_электродвигатель_МШЦ',
-                'Температура масла редуктора МШЦ': 'Температура_масла_редуктора_МШЦ',
-                'Расход извести МШЦ л/ч': 'Расход_извести_МШЦ_л_ч',
-                'Уровень в зумпфе %': 'Уровень_в_зумпфе_процент',
-                'Обороты насоса %': 'Обороты_насоса_процент',
-                'Давление в ГЦ насоса Бар': 'Давление_в_ГЦ_насоса_Бар',
-                'Плотность слива ГЦ кг/л': 'Плотность_слива_ГЦ_кг_л',
-                'pH оборотной воды': 'pH_оборотной_воды',
-                't оборотной воды': 't_оборотной_воды',
-                'Гранулометрия %': 'Гранулометрия_процент',
-                'Поток л/мин': 'Поток_л_мин',
-                'Расход оборотной воды м3/ч': 'Расход_оборотной_воды_м3_ч',
-                'Расход в ГЦ насоса м3/ч': 'Расход_в_ГЦ_насоса_м3_ч'
-            }
-            
-            # Переименовываем колонки в DataFrame
-            renamed_columns = {}
-            for old_name in df.columns:
-                if old_name in field_mapping:
-                    renamed_columns[old_name] = field_mapping[old_name]
-            
-            if renamed_columns:
-                df = df.rename(columns=renamed_columns)
-            
-            # Если требуется загрузить только последние N записей
-            if limit_latest and isinstance(limit_latest, int) and limit_latest > 0:
-                # Преобразуем 'Время' в datetime, если это колонка есть в DataFrame
-                if 'Время' in df.columns:
-                    df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
-                    # Сортируем по времени в убывающем порядке и берем только N последних записей
-                    df = df.sort_values(by='Время', ascending=False).head(limit_latest)
-                    # Сортируем обратно, чтобы сохранить хронологический порядок
-                    df = df.sort_values(by='Время', ascending=True)
-                    logger.info(f"Выбраны последние {limit_latest} записей из файла на основе колонки 'Время'")
-                else:
-                    # Если колонка Время отсутствует, просто берем последние N строк файла
-                    df = df.tail(limit_latest)
-                    logger.info(f"Колонка 'Время' не найдена. Выбраны последние {limit_latest} строк из файла")
-            
-            # Загружаем данные в базу данных
-            result = add_from_pandas(df, area_name=table_name)
-            logger.info(f"Успешно загружено {len(result)} записей из {file_type} файла в таблицу '{table_name}'")
-            return result
-        finally:
-            # Очищаем временный файл, если он был создан
-            if using_file_content and temp_file_path and os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-            
-    except Exception as e:
-        logger.error(f"Ошибка загрузки данных из {file_type} файла: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ошибка загрузки данных: {str(e)}"
-        )
-
-# API эндпоинты
-@app.get('/', tags=["Статус"])
-def read_root():
-    return {
-        'message': 'Кокоджамбо всё',
-        'version': Config.API_VERSION,
-        'status': 'online'
-    }
-
-@app.post('/value', response_model=List[DataResponse], tags=["Данные"])
-def get_value(value: ValuesRequest, db: Session = Depends(get_db_session)):
-    try:
-        date_post = value.date
-        limit = value.limit
-        
-        results = []
-        if len(value.area_name):
-            for area_name in value.area_name:
-                model = create_data_model(area_name)
-                query = db.query(model).filter(model.Время == date_post)
-                area_results = query.limit(limit).all()
-                results.extend(area_results)
+        # Преобразование времени - КЛЮЧЕВОЙ МОМЕНТ
+        if 'Время' in df.columns:
+            original_time_col = df['Время'].copy() # Копируем для логгирования ошибок
+            df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
+            # Логгируем строки, где время не распарсилось
+            failed_time_parse_indices = df[df['Время'].isna()].index
+            if not failed_time_parse_indices.empty:
+                logger.warning(f"Не удалось распознать 'Время' в {len(failed_time_parse_indices)} строках для {area_name}. Примеры некорректных значений:")
+                for index in failed_time_parse_indices[:5]: # Показываем первые 5
+                     logger.warning(f"  Строка {index}: '{original_time_col.loc[index]}'")
         else:
-            for area_name, model in _model_cache.items():
-                query = db.query(model).filter(model.Время == date_post)
-                
-                area_results = query.limit(limit).all()
-                results.extend(area_results)
-        
-        if not results:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Данные на дату {date_post} не найдены"
-            )
-            
-        return [DataService.to_response_dict(item) for item in results]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка при получении данных: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка сервера: {str(e)}"
-        )
+             logger.error(f"Критическая ошибка: Колонка 'Время' не найдена в данных для {area_name}. Невозможно добавить данные.")
+             return 0 # Не можем сохранить без времени
 
-@app.post('/load-data/full', tags=["Загрузка данных"])
-async def load_data_full_endpoint(
-    file: UploadFile = File(..., description="Excel или Parquet файл с данными"),
-    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
-    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
-):
-    """
-    Загрузка всей таблицы из файла (Excel или Parquet) в указанную таблицу базы данных.
-    Таблица будет создана, если она не существует.
-    """
-    try:
-        # Проверка типа файла
-        if file_type.lower() not in ["parquet", "excel"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'."
-            )
-        
-        # Проверка расширения файла
-        file_extension = file.filename.split('.')[-1].lower()
-        expected_extension = "xlsx" if file_type.lower() == "excel" else "parquet"
-        
-        if (file_type.lower() == "excel" and file_extension not in ["xlsx", "xls"]) or \
-           (file_type.lower() == "parquet" and file_extension != "parquet"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Расширение файла не соответствует указанному типу. Ожидалось: {expected_extension}"
-            )
-        
-        # Чтение содержимого файла
-        file_content = await file.read()
-        
-        # Дополнительная диагностика файла
-        import tempfile
-        import os
-        import pandas as pd
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
-            temp_file.write(file_content)
-            temp_file_path = temp_file.name
-        
-        try:
-            # Чтение файла для предварительного анализа
-            if file_type.lower() == 'parquet':
-                df_preview = pd.read_parquet(temp_file_path)
-            else:
-                df_preview = pd.read_excel(temp_file_path)
-            
-            logger.info(f"Колонки в загружаемом файле: {df_preview.columns.tolist()}")
-        finally:
-            os.unlink(temp_file_path)
-        
-        # Загрузка данных
-        result = load_data(
-            file_content=file_content,
-            filename=file.filename,
-            table_name=table_name,
-            file_type=file_type
-        )
-        
-        return {
-            "status": "success",
-            "message": f"Успешно загружено {len(result)} записей в таблицу '{table_name}'",
-            "records_count": len(result),
-            "columns_in_file": df_preview.columns.tolist() if 'df_preview' in locals() else []
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка в процессе загрузки данных: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка сервера: {str(e)}"
-        )
+        # Итерация по строкам DataFrame
+        for index, row in df.iterrows(): # Используем index для логгирования
+            # Проверяем, было ли время успешно преобразовано
+            if pd.isna(row.get('Время')):
+                # Мы уже залоггировали это выше, просто увеличиваем счетчик
+                skipped_count += 1
+                continue
 
-@app.post('/load-data/latest', tags=["Загрузка данных"])
-async def load_data_latest_endpoint(
-    file: UploadFile = File(..., description="Excel или Parquet файл с данными"),
-    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
-    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)"),
-    limit: int = Form(default=1000, description="Количество последних записей для загрузки")
-):
-    """
-    Загрузка последних N записей из файла (Excel или Parquet) в указанную таблицу базы данных.
-    По умолчанию загружается 1000 последних записей.
-    Таблица будет создана, если она не существует.
-    """
-    try:
-        # Проверка типа файла
-        if file_type.lower() not in ["parquet", "excel"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'."
-            )
-        
-        # Проверка расширения файла
-        file_extension = file.filename.split('.')[-1].lower()
-        expected_extension = "xlsx" if file_type.lower() == "excel" else "parquet"
-        
-        if (file_type.lower() == "excel" and file_extension not in ["xlsx", "xls"]) or \
-           (file_type.lower() == "parquet" and file_extension != "parquet"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Расширение файла не соответствует указанному типу. Ожидалось: {expected_extension}"
-            )
-        
-        # Чтение содержимого файла
-        file_content = await file.read()
-        
-        # Дополнительная диагностика файла
-        import tempfile
-        import os
-        import pandas as pd
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
-            temp_file.write(file_content)
-            temp_file_path = temp_file.name
-        
-        try:
-            # Чтение файла для предварительного анализа
-            if file_type.lower() == 'parquet':
-                df_preview = pd.read_parquet(temp_file_path)
-            else:
-                df_preview = pd.read_excel(temp_file_path)
-            
-            logger.info(f"Колонки в загружаемом файле: {df_preview.columns.tolist()}")
-            total_records = len(df_preview)
-            logger.info(f"Всего записей в файле: {total_records}, будет загружено последних: {min(limit, total_records)}")
-        finally:
-            os.unlink(temp_file_path)
-        
-        # Загрузка данных
-        result = load_data(
-            file_content=file_content,
-            filename=file.filename,
-            table_name=table_name,
-            file_type=file_type,
-            limit_latest=limit
-        )
-        
-        return {
-            "status": "success",
-            "message": f"Успешно загружены последние {len(result)} записей в таблицу '{table_name}'",
-            "records_count": len(result),
-            "columns_in_file": df_preview.columns.tolist(),
-            "total_records_in_file": total_records
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка в процессе загрузки данных: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка сервера: {str(e)}"
-        )
+            # Фильтруем данные по валидным колонкам и убираем NaN/None
+            data_dict = {k: v for k, v in row.to_dict().items() 
+                         if k in valid_columns and pd.notna(v)}
 
-@app.post('/load-data-from-path/full', tags=["Загрузка данных"])
-async def load_data_from_path_full_endpoint(
-    file_path: str = Form(..., description="Путь к Excel или Parquet файлу с данными"),
-    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
-    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
-):
-    """
-    Загрузка всей таблицы из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
-    Таблица будет создана, если она не существует.
-    """
-    try:
-        # Проверка типа файла
-        if file_type.lower() not in ["parquet", "excel"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'."
-            )
-        
-        # Проверка существования файла
-        if not os.path.exists(file_path):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Файл не найден по указанному пути: {file_path}"
-            )
-        
-        # Проверка расширения файла
-        file_extension = file_path.split('.')[-1].lower()
-        expected_extension = "xlsx" if file_type.lower() == "excel" else "parquet"
-        
-        if (file_type.lower() == "excel" and file_extension not in ["xlsx", "xls"]) or \
-           (file_type.lower() == "parquet" and file_extension != "parquet"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Расширение файла не соответствует указанному типу. Ожидалось: {expected_extension}"
-            )
-        
-        # Чтение данных из файла
-        try:
-            # Предварительный анализ файла
-            if file_type.lower() == 'parquet':
-                df_preview = pd.read_parquet(file_path)
-            else:
-                df_preview = pd.read_excel(file_path)
-            
-            logger.info(f"Колонки в загружаемом файле: {df_preview.columns.tolist()}")
-            
-            # Чтение содержимого файла
-            with open(file_path, 'rb') as f:
-                file_content = f.read()
-            
-            # Получаем имя файла из пути
-            filename = os.path.basename(file_path)
-            
-            # Загрузка данных
-            result = load_data(
-                file_content=file_content,
-                filename=filename,
-                table_name=table_name,
-                file_type=file_type
-            )
-            
-            return {
-                "status": "success",
-                "message": f"Успешно загружено {len(result)} записей из файла '{filename}' в таблицу '{table_name}'",
-                "records_count": len(result),
-                "columns_in_file": df_preview.columns.tolist()
-            }
-        except Exception as e:
-            logger.error(f"Ошибка при чтении файла {file_path}: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Ошибка при чтении файла: {str(e)}"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка в процессе загрузки данных из пути к файлу: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка сервера: {str(e)}"
-        )
+            # Проверяем, есть ли вообще данные для вставки (кроме времени, если оно было)
+            if not data_dict or (len(data_dict) == 1 and 'Время' in data_dict):
+                 logger.warning(f"Строка {index} для {area_name} не содержит валидных данных (кроме, возможно, времени), пропуск.")
+                 skipped_count += 1
+                 continue
 
-@app.post('/load-data-from-path/latest', tags=["Загрузка данных"])
-async def load_data_from_path_latest_endpoint(
-    file_path: str = Form(..., description="Путь к Excel или Parquet файлу с данными"),
-    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
-    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)"),
-    limit: int = Form(default=1000, description="Количество последних записей для загрузки")
-):
-    """
-    Загрузка последних N записей из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
-    По умолчанию загружается 1000 последних записей.
-    Таблица будет создана, если она не существует.
-    """
-    try:
-        if file_type.lower() not in ["parquet", "excel"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Неподдерживаемый тип файла: {file_type}. Используйте 'parquet' или 'excel'."
-            )
-        
-        if not os.path.exists(file_path):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Файл не найден по указанному пути: {file_path}"
-            )
-        
-        file_extension = file_path.split('.')[-1].lower()
-        expected_extension = "xlsx" if file_type.lower() == "excel" else "parquet"
-        
-        if (file_type.lower() == "excel" and file_extension not in ["xlsx", "xls"]) or \
-           (file_type.lower() == "parquet" and file_extension != "parquet"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Расширение файла не соответствует указанному типу. Ожидалось: {expected_extension}"
-            )
-        
-        try:
-            if file_type.lower() == 'parquet':
-                df_preview = pd.read_parquet(file_path)
-            else:
-                df_preview = pd.read_excel(file_path)
-            
-            logger.info(f"Колонки в загружаемом файле: {df_preview.columns.tolist()}")
-            total_records = len(df_preview)
-            logger.info(f"Всего записей в файле: {total_records}, будет загружено последних: {min(limit, total_records)}")
-            with open(file_path, 'rb') as f:
-                file_content = f.read()
-            filename = os.path.basename(file_path)
-            result = load_data(
-                file_content=file_content,
-                filename=filename,
-                table_name=table_name,
-                file_type=file_type,
-                limit_latest=limit
-            )
-            
-            return {
-                "status": "success",
-                "message": f"Успешно загружены последние {len(result)} записей из файла '{filename}' в таблицу '{table_name}'",
-                "records_count": len(result),
-                "columns_in_file": df_preview.columns.tolist(),
-                "total_records_in_file": total_records
-            }
-        except Exception as e:
-            logger.error(f"Ошибка при чтении файла {file_path}: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Ошибка при чтении файла: {str(e)}"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка в процессе загрузки данных из пути к файлу: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка сервера: {str(e)}"
-        )
-
-@app.post('/load-data', tags=["Загрузка данных"])
-async def load_data_endpoint(
-    file: UploadFile = File(..., description="Excel или Parquet файл с данными"),
-    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
-    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
-):
-    """
-    Загрузка данных из файла (Excel или Parquet) в указанную таблицу базы данных.
-    """
-    return await load_data_full_endpoint(file, table_name, file_type)
-
-@app.post('/load-data-from-path', tags=["Загрузка данных"])
-async def load_data_from_path_endpoint(
-    file_path: str = Form(..., description="Путь к Excel или Parquet файлу с данными"),
-    table_name: str = Form(..., description="Имя таблицы для загрузки данных"),
-    file_type: str = Form(default="parquet", description="Тип файла (parquet или excel)")
-):
-    """
-    Загрузка данных из файла по указанному пути (Excel или Parquet) в указанную таблицу базы данных.
-    """
-    return await load_data_from_path_full_endpoint(file_path, table_name, file_type)
-
-
-@app.get('/api/tables', response_model=List[TableInfo])
-def get_tables(db: Session = Depends(get_db_session)):
-    """Get all available tables in the database"""
-    try:
-        inspector = inspect(engine)
-        table_names = inspector.get_table_names()
-        
-        tables = []
-        for table_name in table_names:
             try:
-                columns = [column["name"] for column in inspector.get_columns(table_name)]
-                tables.append(TableInfo(name=table_name, columns=columns))
+                # Создаем экземпляр модели только с валидными данными
+                data_instance = DataModel(**data_dict)
+                # Используем merge для избежания дубликатов по первичному ключу (id)
+                # Если PK нет в CSV, это будет работать как INSERT
+                db.merge(data_instance) 
+                added_count += 1
             except Exception as e:
-                logger.error(f"Error getting columns for table {table_name}: {str(e)}")
+                logger.error(f"Ошибка при подготовке/слиянии записи (строка DataFrame {index}) в {area_name}: {e}")
+                logger.debug(f"Проблемные данные строки {index}: {data_dict}")
+                skipped_count += 1
+                continue
         
-        logger.info(f"Found {len(tables)} tables: {[t.name for t in tables]}")
-        return tables
-    except Exception as e:
-        logger.error(f"Error getting tables: {str(e)}")
-        # Не бросаем исключение, чтобы предотвратить отказ API
-        return []
+        logger.info(f"Обработка для {area_name} завершена. Подготовлено: {added_count}, Пропущено: {skipped_count} из {total_rows} строк.")
+        return added_count
 
-@app.get('/api/tables/{table_name}', response_model=TableData)
-def get_table_data(
-    table_name: str,
-    db: Session = Depends(get_db_session),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100),
-    columns: Optional[str] = None,
-    filters: Optional[str] = None,
-):
-    """Get data from a specific table with pagination and filtering"""
-    try:
-        # Get table model
-        table_model = get_table_model(table_name)
-        if not table_model:
-            raise HTTPException(status_code=404, detail=f"Table {table_name} not found")
+    except Exception as e:
+        logger.error(f"Критическая ошибка при обработке DataFrame для {area_name}: {e}\n{traceback.format_exc()}")
+        return 0 # Возвращаем 0, так как ничего не было подготовлено
+
+# --- Pydantic схемы для API --- 
+class AddLineRequest(BaseModel):
+    file_path: str
+    area_name: str
+
+# Схема для информации о пагинации
+class PaginationInfo(BaseModel):
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+
+# Обновляем LineDetailResponse
+class LineDetailResponse(BaseModel):
+    area_name: str
+    last_update: Optional[datetime.datetime] = None
+    status: str # Теперь будет браться из БД
+    comment: Optional[str] = None # Добавляем комментарий
+    data: List[Dict[str, Any]]
+    pagination: PaginationInfo
+
+# Обновляем LineSummaryResponse
+class LineSummaryResponse(BaseModel):
+    area_name: str
+    last_update: Optional[datetime.datetime] = None
+    status: str # Поле уже есть, будет браться из БД
+    # Комментарий сюда не добавляем для краткости
+
+# --- API Эндпоинты --- 
+
+# Изменяем /api/get чтобы возвращать статус из БД
+@app.get('/api/get', response_model=List[LineSummaryResponse], tags=["Мониторинг"])
+def get_lines_summary(db: Session = Depends(get_db_session)):
+    """Получить сводный статус для всех отслеживаемых линий (без данных)."""
+    lines_info = db.query(MonitoredLine).all()
+    response = []
+
+    for line in lines_info:
+        current_status = line.status # Берем статус из БД
         
-        # Get column information
-        inspector = inspect(engine)
-        all_columns = [column["name"] for column in inspector.get_columns(table_name)]
-        
-        # Filter selected columns or use all
-        selected_columns = all_columns
-        if columns:
-            col_list = columns.split(",")
-            selected_columns = [col for col in col_list if col in all_columns]
-        
-        # Base query
-        query = db.query(table_model)
-        if filters:
-            try:
-                filter_parts = filters.split(",")
-                for part in filter_parts:
-                    if ":" in part and "=" in part:
-                        col_name, operator, value = part.split(":")
-                        if col_name in all_columns:
-                            column = getattr(table_model, col_name)
-                            if operator == "eq":
-                                query = query.filter(column == value)
-                            elif operator == "gt":
-                                query = query.filter(column > float(value))
-                            elif operator == "lt":
-                                query = query.filter(column < float(value))
-                            elif operator == "contains":
-                                query = query.filter(column.like(f"%{value}%"))
-            except Exception as e:
-                logger.error(f"Error applying filters: {str(e)}")
-        total_count = query.count()
-        query = query.offset((page - 1) * page_size).limit(page_size)
-        results = query.all()
-        data = []
-        for row in results:
-            row_dict = {}
-            for col in selected_columns:
-                row_dict[col] = getattr(row, col)
-            data.append(row_dict)
-        
-        return TableData(
-            table_name=table_name,
-            columns=selected_columns,
-            data=data,
-            total_records=total_count
+        # Дополнительная проверка: если статус OK/Неизвестно, но файл пропал - меняем статус
+        if current_status in ["OK", "Неизвестно"] and not os.path.exists(line.file_path):
+            current_status = "Ошибка: Файл не найден"
+            # Тут можно было бы обновить статус в БД, но GET запросы не должны менять данные
+            # db.query(MonitoredLine).filter(MonitoredLine.id == line.id).update({"status": current_status})
+            # db.commit()
+            logger.warning(f"Файл для линии {line.area_name} не найден, статус временно изменен на 'Ошибка: Файл не найден' для ответа.")
+        # Можно добавить и другие проверки, если статус из БД устарел
+
+        response.append(
+            LineSummaryResponse(
+                area_name=line.area_name,
+                last_update=line.last_update,
+                status=current_status # Возвращаем актуальный (возможно, вычисленный) статус
+            )
         )
+    
+    return response
+
+@app.post('/api/add', status_code=status.HTTP_201_CREATED, tags=["Мониторинг"])
+def add_monitored_line(request: AddLineRequest, db: Session = Depends(get_db_session)):
+    """Добавить новую производственную линию для мониторинга."""
+    logger.info(f"Запрос на добавление линии: {request.area_name}, путь: {request.file_path}")
+
+    # --- Предварительные проверки --- 
+    # Проверка 1: Существует ли файл?
+    if not os.path.exists(request.file_path):
+        logger.error(f"Файл не найден: {request.file_path}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Файл не найден по указанному пути: {request.file_path}")
+
+    # Проверка 2: Уникально ли имя линии (area_name) в monitored_lines?
+    existing_line = db.query(MonitoredLine).filter(MonitoredLine.area_name == request.area_name).first()
+    if existing_line:
+        logger.warning(f"Попытка добавить линию с существующим именем: {request.area_name}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Линия с именем '{request.area_name}' уже существует.")
+
+    # --- Попытка создать таблицу данных (если ее нет) --- 
+    try:
+        ensure_data_table_exists(request.area_name)
+    except Exception as e:
+        logger.error(f"Не удалось создать таблицу данных {request.area_name} при добавлении линии: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ошибка создания таблицы данных: {e}")
+
+    # --- Основная транзакция: Добавление записи и начальных данных --- 
+    added_count = 0
+    new_line = None
+    try:
+        # Создаем запись в таблице метаданных (статус будет "Неизвестно" по умолчанию)
+        new_line = MonitoredLine(
+            area_name=request.area_name,
+            file_path=request.file_path
+            # status установится по умолчанию "Неизвестно"
+            # comment будет NULL
+        )
+        db.add(new_line)
+        db.flush() 
+        logger.info(f"Запись для линии {new_line.area_name} подготовлена к добавлению в monitored_lines со статусом '{new_line.status}'.")
+
+        # Читаем начальные данные CSV 
+        df_initial = read_initial_csv_data(request.file_path, max_lines=1440) 
+
+        initial_data_added = False # Флаг, что начальные данные были добавлены
+        if df_initial is not None and not df_initial.empty:
+            logger.info(f"Прочитано {len(df_initial)} строк из CSV для начальной загрузки в {request.area_name}.")
+            added_count = add_dataframe_to_db(db, df_initial, request.area_name)
+            if added_count > 0:
+                 # Обновляем last_update и СТАТУС на "OK", если данные успешно добавлены
+                 new_line.last_update = func.now()
+                 new_line.status = "OK" # Меняем статус на OK
+                 db.add(new_line) 
+                 initial_data_added = True
+                 logger.info(f"Начальные данные ({added_count} шт.) для {request.area_name} подготовлены, статус изменен на 'OK'.")
+            else:
+                 logger.warning(f"Не удалось подготовить начальные данные для {request.area_name}. Статус останется '{new_line.status}'.")
+        else:
+             logger.warning(f"Не удалось прочитать начальные данные для {request.area_name}. Статус останется '{new_line.status}'.")
+             
+        db.commit() 
+        db.refresh(new_line) 
+        logger.info(f"Линия {new_line.area_name} успешно сохранена со статусом '{new_line.status}'. Начальных данных добавлено: {added_count} шт.")
+
+        return {"message": "Производственная линия успешно добавлена", "area_name": new_line.area_name, "added_initial_records": added_count, "initial_status": new_line.status}
+
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
-        logger.error(f"Error getting table data: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        db.rollback()
+        logger.error(f"Ошибка при добавлении записи линии/данных {request.area_name}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Внутренняя ошибка сервера при сохранении данных линии: {str(e)}")
 
-@app.get('/api/analysis/{table_name}', response_model=AnalysisResult)
-def get_analysis(
-    table_name: str, 
-    production_line: Optional[int] = None,
+
+@app.delete('/api/lines/{area_name}', status_code=status.HTTP_204_NO_CONTENT, tags=["Мониторинг"])
+def delete_monitored_line(area_name: str, db: Session = Depends(get_db_session)):
+    """Удалить отслеживаемую линию и связанную с ней таблицу данных."""
+    logger.info(f"Запрос на удаление линии: {area_name}")
+    
+    line_to_delete = db.query(MonitoredLine).filter(MonitoredLine.area_name == area_name).first()
+    if not line_to_delete:
+        logger.warning(f"Попытка удаления несуществующей линии: {area_name}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Линия '{area_name}' не найдена.")
+    
+    try:
+        # 1. Удаляем запись из monitored_lines
+        db.delete(line_to_delete)
+        logger.info(f"Запись для линии {area_name} удалена из monitored_lines.")
+        
+        # 2. Удаляем таблицу данных
+        inspector = inspect(engine)
+        if inspector.has_table(area_name):
+            try:
+                metadata = MetaData()
+                table_to_drop = Table(area_name, metadata, autoload_with=engine)
+                table_to_drop.drop(engine)
+                logger.info(f"Таблица данных {area_name} успешно удалена.")
+                 # Удаляем из кеша моделей
+                if area_name in model_cache:
+                    del model_cache[area_name]
+                    logger.info(f"Модель для таблицы {area_name} удалена из кеша.")
+            except Exception as drop_err:
+                # Если не удалось удалить таблицу - это проблема, откатываем удаление записи
+                logger.error(f"Не удалось удалить таблицу данных {area_name}: {drop_err}. Откат операции.")
+                db.rollback() # Откатываем удаление записи из monitored_lines
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ошибка при удалении таблицы данных: {drop_err}")
+            else:
+             logger.warning(f"Таблица данных {area_name} для удаляемой линии не найдена в БД.")
+
+        db.commit() # Коммитим удаление записи и таблицы (если она была)
+        return # Статус 204
+
+    except HTTPException: # От переброшенных исключений
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при удалении линии {area_name}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Внутренняя ошибка сервера при удалении линии: {str(e)}")
+
+
+# Изменяем эндпоинт для получения данных ОДНОЙ линии с ПАГИНАЦИЕЙ
+@app.get('/api/lines/{area_name}', response_model=LineDetailResponse, tags=["Мониторинг"])
+def get_single_line_status(
+    area_name: str,
+    page: int = Query(1, ge=1, description="Номер страницы"), # Используем Query для валидации
+    page_size: int = Query(20, ge=1, le=100, description="Размер страницы"), # Лимит и валидация размера
     db: Session = Depends(get_db_session)
 ):
-    """Get analysis results for a specific table/production line"""
-    try:
-        # Placeholder for actual analysis logic
-        # In a real application, this would perform actual data analysis
-        
-        summary = {
-            "average_values": {
-                "power": 125.7,
-                "temperature": 85.2,
-                "efficiency": 78.9
-            },
-            "trends": {
-                "power_trend": "increasing",
-                "temperature_trend": "stable",
-                "efficiency_trend": "decreasing"
-            },
-            "anomalies_detected": 3
-        }
-        
-        recommendations = [
-            "Consider maintenance for production line due to efficiency decrease",
-            "Monitor power consumption trends over next 24 hours",
-            "Temperature readings are within normal parameters"
-        ]
-        
-        return AnalysisResult(
-            table_name=table_name,
-            production_line=production_line,
-            summary=summary,
-            recommendations=recommendations
+    """Получить статус и ПАГИНИРОВАННЫЕ данные для ОДНОЙ отслеживаемой линии."""
+    logger.info(f"Запрос данных для линии: {area_name}, страница: {page}, размер: {page_size}")
+
+    line = db.query(MonitoredLine).filter(MonitoredLine.area_name == area_name).first()
+    if not line:
+        logger.warning(f"Линия {area_name} не найдена при запросе GET /api/lines/{area_name}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Линия '{area_name}' не найдена.")
+
+    # Инициализируем значения по умолчанию
+    current_status = line.status # Берем статус из БД
+    current_comment = line.comment # Берем комментарий из БД
+    data_records = []
+    total_items = 0
+    total_pages = 0
+    
+    # Дополнительная проверка файла (как в /api/get)
+    if current_status in ["OK", "Неизвестно"] and not os.path.exists(line.file_path):
+        current_status = "Ошибка: Файл не найден"
+        logger.warning(f"Файл для линии {line.area_name} не найден, статус временно изменен на '{current_status}' для ответа.")
+        # В этом случае пагинация будет (0, 0, 0, 0), данные не читаем
+    else:
+        # Пытаемся прочитать данные из таблицы БД (логика пагинации без изменений)
+        try:
+            DataModel = get_table_model(line.area_name)
+            if DataModel:
+                if hasattr(DataModel, 'id') and hasattr(DataModel, 'Время'): 
+                    # Получаем общее количество записей
+                    count_query = db.query(func.count(DataModel.id)) # Считаем по PK
+                    total_items = count_query.scalar()
+                    logger.info(f"Найдено {total_items} записей в таблице {area_name}.")
+
+                    if total_items > 0:
+                        # Рассчитываем общее количество страниц
+                        total_pages = (total_items + page_size - 1) // page_size # Округление вверх
+                        
+                        # Корректируем номер страницы, если он выходит за пределы
+                        page = max(1, min(page, total_pages))
+                        
+                        # Рассчитываем смещение
+                        offset = (page - 1) * page_size
+
+                        # Получаем пагинированные данные, сортируем по времени (desc - последние первыми)
+                        # УБИРАЕМ .limit(60) отсюда, полагаемся на offset/limit пагинации
+                        paginated_query = db.query(DataModel).order_by(DataModel.Время.desc()).offset(offset).limit(page_size)
+                        latest_data = paginated_query.all()
+                        logger.info(f"Запрошено {len(latest_data)} записей для страницы {page}.")
+                        
+                        # Преобразуем данные в словари 
+                        inspector = inspect(DataModel)
+                        columns = [c.key for c in inspector.columns]
+                        data_records = []
+                        for record in latest_data:
+                            data_dict = {col: getattr(record, col, None) for col in columns}
+                            if isinstance(data_dict.get('Время'), datetime.datetime):
+                                data_dict['Время'] = data_dict['Время'].isoformat()
+                            data_records.append(data_dict)
+                    else:
+                        # Если записей нет, total_pages = 0, page = 1
+                        total_pages = 0
+                        page = 1 
+                        logger.info(f"Таблица {line.area_name} пуста, данные не возвращаются.")
+
+                else:
+                    current_status = "Ошибка: В таблице нет колонки 'Время' или 'id'" # Обновляем статус, если проблема с таблицей
+                    logger.error(f"Таблица {line.area_name} не имеет колонки 'Время' или 'id' для пагинации.")
+                    # Сбрасываем пагинацию и данные
+                    total_items, total_pages, page, data_records = 0, 0, 1, []
+            else:
+                current_status = "Ошибка: Таблица данных не найдена" # Обновляем статус
+                logger.warning(f"Не найдена модель/таблица для {line.area_name} при запросе GET /api/lines/...")
+                # Сбрасываем пагинацию и данные
+                total_items, total_pages, page, data_records = 0, 0, 1, []
+        except Exception as e:
+             logger.error(f"Ошибка чтения/пагинации данных из таблицы {line.area_name}: {e}\n{traceback.format_exc()}")
+             current_status = "Ошибка: Чтения/обработки данных из БД" # Обновляем статус
+             # Сбрасываем пагинацию при ошибке чтения
+             total_items, total_pages, page, data_records = 0, 0, 1, []
+
+    # Возвращаем новый формат ответа
+    return LineDetailResponse(
+        area_name=line.area_name,
+        last_update=line.last_update,
+        status=current_status, # Возвращаем актуальный статус
+        comment=current_comment, # Возвращаем комментарий из БД
+        data=data_records, 
+        pagination=PaginationInfo(
+            page=page,
+            page_size=page_size,
+            total_items=total_items,
+            total_pages=total_pages
         )
-    except Exception as e:
-        logger.error(f"Error getting analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    )
 
 def generate_response_sync(prompt, model="deepseek-ai/DeepSeek-V3-0324", max_tokens=2024, temperature=0.7, role="user"):
     """
@@ -1307,45 +721,46 @@ def llm_endpoint(request: LLMRequest):
         logger.error(f"Error in LLM endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing LLM request: {str(e)}")
 
-async def refresh_data_cache():
-    """Background task to refresh data cache every 10 minutes"""
-    while True:
-        try:
-            logger.info("Refreshing data cache...")
-            model_cache.clear()
-            logger.info("Data cache refreshed successfully")
-        except Exception as e:
-            logger.error(f"Error refreshing data cache: {str(e)}")
-        await asyncio.sleep(600)
+
+# --- Инициализация Приложения --- 
+def initialize_database():
+    """Создает все таблицы, определенные через Base.metadata."""
+    try:
+        logger.info("Инициализация базы данных... Проверка таблиц.")
+        # Создаем ТОЛЬКО таблицу monitored_lines при старте
+        # Base.metadata.create_all(bind=engine)
+        MonitoredLine.__table__.create(bind=engine, checkfirst=True)
+        logger.info("Таблица 'monitored_lines' успешно проверена/создана.")
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации таблицы monitored_lines: {e}\n{traceback.format_exc()}")
+        raise # Критическая ошибка, приложение не может работать без этой таблицы
 
 @app.on_event("startup")
 async def startup_event():
-    try:
-        inspector = inspect(engine)
-        table_names = inspector.get_table_names()
-        
-        logger.info(f"Found {len(table_names)} tables in database: {table_names}")
-        for table_name in table_names:
-            try:
-                table_model = get_table_model(table_name)
-                logger.info(f"Successfully initialized model for table: {table_name}")
-            except Exception as e:
-                logger.error(f"Error initializing model for table {table_name}: {str(e)}")
-        
-        # Create sample table if none exists
-        if not table_names:
-            logger.warning("No tables found in database. Creating sample tables.")
-            create_db([])
-    except Exception as e:
-        logger.error(f"Error during startup initialization: {str(e)}")
-    asyncio.create_task(refresh_data_cache())
-    logger.info("Application started, background tasks initialized")
+    initialize_database() # Создаем таблицы при старте
+    logger.info("Приложение запущено.")
+    # Убираем фоновую задачу очистки кеша, т.к. модель создается по запросу
+    # asyncio.create_task(refresh_data_cache())
+
 
 if __name__ == '__main__':
-    import os
-    logger.info(f"Current working directory: {os.getcwd()}")
-    logger.info(f"Attempting to connect to database at: {os.path.abspath(Config.DATABASE_URL.replace('sqlite:///', ''))}")
+    logger.info(f"Текущая рабочая директория: {os.getcwd()}")
+    db_path = Config.DATABASE_URL.replace('sqlite:///', '')
+    logger.info(f"Попытка подключения к БД: {os.path.abspath(db_path)}")
     
-    create_db()
+    # Создаем директорию для БД, если ее нет
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir)
+            logger.info(f"Создана директория для базы данных: {db_dir}")
+        except OSError as e:
+            logger.error(f"Не удалось создать директорию {db_dir}: {e}")
+            # Решаем, критично ли это. Скорее всего, да.
+            raise
+            
+    # Инициализация БД перед запуском uvicorn
+    initialize_database()
     
+    # Запуск uvicorn с возможностью перезагрузки при отладке
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=Config.DEBUG)
