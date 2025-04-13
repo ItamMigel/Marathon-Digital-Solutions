@@ -348,18 +348,42 @@ class DataService:
             # Получаем список допустимых колонок модели
             valid_columns = [c.name for c in DataModel.__table__.columns]
             
+            # Преобразуем колонку 'Время' в объекты datetime перед циклом
+            # Используем errors='coerce' для замены невалидных дат на NaT (Not a Time)
+            if 'Время' in df.columns and 'Время' in valid_columns:
+                try:
+                    df['Время'] = pd.to_datetime(df['Время'], errors='coerce')
+                    # Логируем, если были ошибки преобразования
+                    failed_conversion = df['Время'].isna().sum()
+                    if failed_conversion > 0:
+                        logger.warning(f"В таблице '{area_name}' найдено {failed_conversion} строк с неверным форматом 'Время'. Эти строки будут пропущены.")
+                except Exception as e:
+                    logger.error(f"Ошибка при преобразовании колонки 'Время' в datetime для таблицы '{area_name}': {e}. Попытка продолжить без преобразования.")
+            elif 'Время' in valid_columns:
+                 logger.warning(f"Колонка 'Время' ожидается в таблице '{area_name}', но не найдена в DataFrame.")
+                 # Обработка ситуации, когда колонка 'Время' отсутствует, но необходима
+
             for _, row in df.iterrows():
                 data_dict = row.to_dict()
+
+                # Пропускаем строки, где 'Время' не удалось преобразовать (стало NaT)
+                # или если 'Время' обязательно и отсутствует
+                if 'Время' in valid_columns:
+                    время_value = data_dict.get('Время')
+                    if pd.isna(время_value):
+                         logger.warning(f"Пропуск строки из-за некорректного или отсутствующего значения 'Время': {row.to_dict()}")
+                         continue
+
                 # Отфильтровываем только те ключи, которые есть в модели
                 filtered_dict = {k: v for k, v in data_dict.items() if k in valid_columns}
-                
+
                 if not filtered_dict:
                     # Преобразуем колонки, заменяя пробелы на подчеркивания и сохраняя единицы измерения
                     processed_dict = {}
                     for key, value in data_dict.items():
                         # Заменяем пробелы на подчеркивания и слеш на подчеркивание
                         processed_key = key.replace(' ', '_').replace('/', '_')
-                        
+
                         # Проверяем, есть ли такой ключ в допустимых колонках
                         if processed_key in valid_columns:
                             processed_dict[processed_key] = value
@@ -378,14 +402,16 @@ class DataService:
                                         break
                 else:
                     processed_dict = filtered_dict
-                
-                # Убеждаемся, что у нас есть все необходимые колонки
-                if 'Время' not in processed_dict and 'Время' in valid_columns:
-                    # Если нет времени, но оно требуется - пропускаем запись
-                    continue
-                
+
+                # Дополнительная проверка на наличие 'Время' перед созданием объекта
+                if 'Время' in valid_columns and ('Время' not in processed_dict or pd.isna(processed_dict.get('Время'))):
+                     logger.warning(f"Пропуск строки из-за отсутствия или некорректного значения 'Время' после обработки: {data_dict}")
+                     continue
+
                 try:
-                    data_instance = DataModel(**processed_dict)
+                    # Убираем NaT значения перед передачей в модель (если они остались)
+                    final_dict = {k: v for k, v in processed_dict.items() if not pd.isna(v)}
+                    data_instance = DataModel(**final_dict)
                     db.add(data_instance)
                     added_data.append(data_instance)
                 except Exception as e:
@@ -393,7 +419,7 @@ class DataService:
                     logger.error(f"Ошибка при добавлении записи: {str(e)}")
                     logger.error(f"Проблемные данные: {processed_dict}")
                     continue
-                
+
             db.commit()
             return added_data
         except Exception as e:
@@ -1022,7 +1048,7 @@ async def startup_event():
         # Create sample table if none exists
         if not table_names:
             logger.warning("No tables found in database. Creating sample tables.")
-            create_db(["production_line_1"])
+            create_db([])
     except Exception as e:
         logger.error(f"Error during startup initialization: {str(e)}")
     
