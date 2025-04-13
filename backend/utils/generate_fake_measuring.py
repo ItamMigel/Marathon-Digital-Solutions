@@ -58,7 +58,6 @@ def generate_fake_data() -> Dict[str, Any]:
         "Расход оборотной воды м3/ч": 450,
         "pH оборотной воды": 7.5,
         "t оборотной воды": 22.5,
-        "Гранулометрия %": 75,
         "Поток л/мин": 1200,
         "Температура масла основной маслостанции слив МПСИ": 45,
         "Температура масла маслостанции электродвигатель МШЦ": 55,
@@ -131,7 +130,7 @@ def generate_data_periodically(file_path: str, interval_seconds: int = 60) -> No
 if __name__ == "__main__":
     import argparse
     
-    file = 'data/df_area_2.csv'
+    file = 'data/df_area_1_bez_granulometrii.csv'
     interval = 60
     
     generate_data_periodically(file, interval)
