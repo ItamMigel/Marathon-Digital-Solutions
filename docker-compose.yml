@@ -27,10 +27,12 @@ services:
     volumes:
       # Монтируем код backend для разработки
       - ./backend:/app/backend
+      # Монтируем локальную папку data в /app/data внутри контейнера
+      - ./data:/app/data
+      # Монтируем внешнюю папку с данными
+    #   - C:/Users/maxsi/Marathon-Digital-Solutions-3/data:/app/external_data
     # Можно добавить переменные окружения для backend, если нужно
     # environment:
-    #   - DB_HOST=database
-    #   - SECRET_KEY=your_secret_key
 
 # Если нужна база данных или другие сервисы, их можно добавить сюда
 # volumes:
