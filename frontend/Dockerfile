@@ -1,5 +1,5 @@
 # Используем базовый образ Node.js (укажи нужную версию, если она отличается)
-FROM node:18-alpine
+FROM node:22-alpine
 
 # Устанавливаем рабочую директорию
 WORKDIR /app/frontend
@@ -16,5 +16,5 @@ COPY . .
 # Открываем порт, на котором работает dev server (стандартный для Vite/Next.js - 5173)
 EXPOSE 5173
 
-# Команда для запуска dev server
-CMD ["npm", "run", "dev"] 
+# Команда для запуска dev server с флагом --host
+CMD ["npm", "run", "dev", "--", "--host"] 
