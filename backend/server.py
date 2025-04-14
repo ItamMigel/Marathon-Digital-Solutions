@@ -352,8 +352,9 @@ def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
                     ddata = dict()
                     for key in data_dict.keys():
                         ddata[new_field_mapping[key]] = data_dict[key]
-                    print(pd.DataFrame([ddata]))
-                    data_dict['Гранулометрия_процент'] = neyronka.predict(pd.DataFrame([ddata]))
+                    df_ddata = pd.DataFrame([ddata])
+                    df_ddata = create_advanced_features(df_ddata, top_features=neyronka.top_features, n_features=200)
+                    data_dict['Гранулометрия_процент'] = neyronka.predict(df_ddata)
                     print(f"DB ADD: Добавляем новую гранулометрию в словарь: {data_dict['Гранулометрия_процент']}")
                 else:
                     # Явное преобразование к float для обеспечения правильного типа

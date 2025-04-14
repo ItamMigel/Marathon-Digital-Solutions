@@ -21,7 +21,10 @@ from sklearn.metrics import mean_absolute_error, median_absolute_error, explaine
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
+    datefmt='%H:%M:%S',
+    filename='model.log',
+    filemode='a',
+    encoding='utf-8'
 )
 logger = logging.getLogger()
 
