@@ -15,7 +15,6 @@ import gc
 import psutil
 from scipy.stats import spearmanr
 from sklearn.metrics import mean_absolute_error, median_absolute_error, explained_variance_score, r2_score
-import joblib
 
 
 # Настраиваем логирование
@@ -195,17 +194,36 @@ class Model:
     Включает подбор гиперпараметров, создание продвинутых признаков,
     обучение, оценку и сохранение лучшей модели.
     """
-    def __init__(self, data: pd.DataFrame):
+    def __init__(self, data: pd.DataFrame, is_load_model: bool = False):
         """
         Инициализирует модель.
         """
-        pass
+        self.data = data # Сохраняем исходные данные
+        self.X = None
+        self.y = None
+        self.target_column = None  # Колонка с целевой переменной (Гранулометрия)
+        self.numeric_cols = None  # Список числовых колонок для обучения модели
+        self.best_model = None
+        self.final_scaler = None # Scaler для лучшей модели
+        self.final_features = None # Список признаков для лучшей модели
+        self.top_features = None # Список топ-признаков для генерации расширенных (если нужны)
+        self.is_advanced_model = False # Флаг, указывающий, является ли лучшая модель расширенной
+        
+        # Вызываем подготовку данных сразу при инициализации
+        if data is not None:
+            self._prepare_data(data)
+        
+        # Загружаем лучшую модель
+        if is_load_model:
+            self._load_model_state('model.pkl', 'scaler.pkl', 'features.json', 'top_features.json')
 
     def _prepare_data(self, data: pd.DataFrame):
         self.data = data
-        # Используем больше данных для лучшего результата
-        self.data = self.data.sample(frac=0.3, random_state=42)
-        logger.info(f"Используем данные, размер: {len(self.data)} записей (30% от общего объема)")
+
+        # TODO: посмотреть что это такое
+        # # Используем больше данных для лучшего результата
+        # self.data = self.data.sample(frac=0.3, random_state=42)
+        # logger.info(f"Используем данные, размер: {len(self.data)} записей (30% от общего объема)")
 
         # Выбор целевой переменной
         self.target_column = [col for col in self.data.columns if 'Гранулометрия' in col][0]
@@ -219,12 +237,6 @@ class Model:
         self.numeric_cols = self.data.select_dtypes(include=['int64', 'float64']).columns.tolist()
         self.numeric_cols = [col for col in self.numeric_cols if col != self.target_column]
         logger.info(f"Всего числовых колонок (без таргета): {len(self.numeric_cols)}")
-
-        # Добавим проверку на наличие столбцов datetime в данных
-        datetime_cols = self.data.select_dtypes(include=['datetime64']).columns.tolist()
-        if datetime_cols:
-            logger.info(f"Обнаружены столбцы с типом datetime: {datetime_cols}")
-            logger.info("Эти столбцы будут исключены из анализа")
         
         # Краткий анализ корреляции признаков с целевой переменной
         logger.info("Анализ корреляции признаков с целевой переменной")
@@ -297,7 +309,7 @@ class Model:
 
         del self.data
         free_memory()
-        logger.info("Приступаю к обучению модели...")
+        logger.info("Приступаю к модели...")
 
         param_dist = {
             'n_estimators': [100, 200, 300],
@@ -347,7 +359,7 @@ class Model:
         # Кросс-валидация
         logger.info("Выполняем кросс-валидацию на 3 фолдах...")
         cv_scores = cross_val_score(
-        self.best_model, 
+            self.best_model, 
             X_sample,
             y_sample, 
             cv=3,
@@ -359,7 +371,7 @@ class Model:
         # Извлекаем важность признаков
         importances = self.best_model.feature_importances_
         feature_importance = [(self.numeric_cols[i], importance) for i, importance in enumerate(importances)]
-        feature_importance.sort(key=lambda x: x[1], reverse=True)
+        feature_importance.sort(key=lambda x: abs(x[1]), reverse=True)
         
         top_features = [feature[0] for feature in feature_importance[:50]]
         
@@ -371,8 +383,9 @@ class Model:
         logger.info("Создание расширенных признаков...")
         X_train_advanced = create_advanced_features(X_train, top_features, n_features=200)
         X_test_advanced = create_advanced_features(X_test, top_features, n_features=200)
+        advanced_feature_names = list(X_train_advanced.columns) # Получаем имена новых признаков
         
-        # Масштабиизнаков
+        # Масштабирование расширенных признаков
         logger.info("Масштабирование расширенных признаков...")
         scaler_advanced = StandardScaler()
         X_train_advanced_scaled = scaler_advanced.fit_transform(X_train_advanced)
@@ -390,19 +403,25 @@ class Model:
         # Вычисление метрик для модели с расширенными признаками
         metrics_advanced = self._calculate_metrics(y_test, y_pred_advanced)
         
-        # Сохраняем лучшую модель (базовую или расширенную)
+        # Сохраняем лучшую модель (базовую или расширенную) и соответствующий scaler/признаки
         if metrics_advanced['rmse'] < metrics['rmse']:
             logger.info("Модель с расширенными признаками показала лучший результат!")
-            best_overall_model = advanced_model
+            self.best_model = advanced_model # Обновляем self.best_model
+            self.final_scaler = scaler_advanced # Сохраняем scaler для расширенных признаков
+            self.final_features = advanced_feature_names # Сохраняем список расширенных признаков
+            self.top_features = top_features # Сохраняем список топ-признаков для генерации расширенных
+            self.is_advanced_model = True
             best_overall_metrics = metrics_advanced
-            joblib.dump(advanced_model, 'advanced_rf_model.pkl')
-            logger.info("Сохранена модель с расширенными признаками: advanced_rf_model.pkl")
+            logger.info("Сохранена модель с расширенными признаками: advanced_rf_model.pkl, scaler: advanced_scaler.pkl, features: advanced_features.json, top_features: top_features_for_advanced.json")
         else:
             logger.info("Базовая модель показала лучший результат.")
-            best_overall_model = self.best_model
+            self.final_scaler = scaler # Сохраняем scaler для базовой модели
+            self.final_features = self.numeric_cols # Сохраняем список базовых признаков
+            # self.best_model уже содержит базовую модель
+            self.is_advanced_model = False
+            self.top_features = None
             best_overall_metrics = metrics
-            joblib.dump(self.best_model, 'improved_rf_model.pkl')
-            logger.info("Сохранена базовая модель: improved_rf_model.pkl")
+            logger.info("Сохранена базовая модель: improved_rf_model.pkl, scaler: improved_scaler.pkl, features: improved_features.json")
         
         # Сохраняем информацию о важности признаков
         logger.info("\nВажность топ-10 признаков:")
@@ -413,22 +432,25 @@ class Model:
         save_metrics_report(metrics, feature_importance, "Full_Model")
         save_metrics_report(metrics_advanced, feature_importance, "Advanced_Model")
 
+        # Устанавливаем порог важности признаков на уровне 75-го процентиля
+        # Это означает, что мы выберем только те признаки, важность которых 
+        # превышает значение, ниже которого находятся 75% всех признаков
         threshold = np.percentile(self.best_model.feature_importances_, 75)
         logger.info(f"Порог важности признаков: {threshold:.4f}")
         
         # Фильтрация признаков
         important_indices = np.where(self.best_model.feature_importances_ > threshold)[0]
-        important_features = [X_train.columns[i] for i in important_indices]
+        important_features = [self.final_features[i] for i in important_indices]
         logger.info(f"Отобрано {len(important_features)} важных признаков из {X_train.shape[1]}")
         
         # Используем только важные признаки
-        X_train_important = X_train[important_features]
-        X_test_important = X_test[important_features]
+        X_train_important = X_train_advanced[important_features]
+        X_test_important = X_test_advanced[important_features]
         
         # Масштабирование
-        self.scaler_important = StandardScaler()
-        X_train_important_scaled = self.scaler_important.fit_transform(X_train_important)
-        X_test_important_scaled = self.scaler_important.transform(X_test_important)
+        scaler_important = StandardScaler() # Локальная переменная
+        X_train_important_scaled = scaler_important.fit_transform(X_train_important)
+        X_test_important_scaled = scaler_important.transform(X_test_important)
         
         # Обучаем модель на важных признаках
         logger.info("Обучение модели на отобранных признаках...")
@@ -440,48 +462,100 @@ class Model:
         
         # Метрики для модели с отобранными признаками
         metrics_important = self._calculate_metrics(y_test, y_pred_important)
+
+        if metrics_important['rmse'] < best_overall_metrics['rmse']:
+            logger.info("Модель с отобранными признаками показала лучший результат!")
+            self.best_model = important_model
+            self.final_scaler = scaler_important
+            self.final_features = important_features
+            best_overall_metrics = metrics_important
+        else:
+            logger.info("Модель с отобранными признаками показала худший результат.")
         
         # Сохраняем отчеты
         save_metrics_report(metrics_important, feature_importance, "Selected_Features")
         
         logger.info("Обучение модели завершено")
-        return best_overall_model, best_overall_metrics
+
+        joblib.dump(self.best_model, 'model.pkl')
+        joblib.dump(self.final_scaler, 'scaler.pkl')
+        with open('features.json', 'w') as f:
+            json.dump(self.final_features, f)
+        with open('top_features.json', 'w') as f:
+            json.dump(self.top_features, f)
+
+        return self.best_model, best_overall_metrics
     
+
+    def _load_model_state(self, model_path: str, scaler_path: str, features_path: str, top_features_path: str):
+        """Загружает состояние модели (модель, scaler, признаки) из файлов."""
+        logger.info("Загрузка состояния модели из файлов...")
+
+        self.best_model = joblib.load(model_path)
+        self.final_scaler = joblib.load(scaler_path)
+        with open(features_path, 'r') as f:
+            self.final_features = json.load(f)
+        with open(top_features_path, 'r') as f:
+            self.top_features = json.load(f)
+        logger.info("Модель с расширенными признаками успешно загружена.")
+        self.is_advanced_model = True
+
 
     def predict(self, data: pd.DataFrame):
         """
-        Делает предсказание на основе лучшей модели
+        Делает предсказание на основе лучшей модели.
+        Загружает состояние модели из файлов, если необходимо.
         """
-        if self.best_model is None:
-            raise ValueError("Модель не обучена")
-        
-        data = data[self.numeric_cols]
-        
-        data = data[self.numeric_cols]
-        X_scaled = self.scaler_important.fit_transform(data)
+        X_pred = data
 
-        # Предсказание
+        if self.is_advanced_model:
+            X_pred_final = create_advanced_features(X_pred, self.top_features, n_features=200)
+            X_pred_final = X_pred_final[self.final_features]
+        else:
+            X_pred_final = X_pred[self.final_features]
+
+        logger.info(f"Выбрано {X_pred_final.columns} признаков для предсказания.")
+
+        # 5. Масштабировать данные
+        X_scaled = self.final_scaler.transform(X_pred_final)
+        logger.info("Данные масштабированы.")
+
+        # 6. Предсказание
+        logger.info("Выполнение предсказания...")
         y_pred = self.best_model.predict(X_scaled)
+        logger.info("Предсказание завершено.")
         
         return y_pred
     
 if __name__ == "__main__":
     data = pd.read_parquet("data/data_after_analys.parquet")
-    # Разделение данных на обучающую и тестовую выборки
-    X = data.drop('Гранулометрия %', axis=1)
-    y = data['Гранулометрия %']
-    # Разделение данных на обучающую и тестовую выборки
-    X = data.drop('Гранулометрия %', axis=1)
-    y = data['Гранулометрия %']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    data_train = pd.concat([X_train, y_train], axis=1)
-    data_test = pd.concat([X_test, y_test], axis=1)
+    
+    # Определяем целевую переменную (нужно для stratify и удаления перед predict)
+    target_column_name = [col for col in data.columns if 'Гранулометрия' in col][0]
+    
+    # Разделение данных на обучающую и тестовую выборки (DataFrames)
+    # Используем stratify, если целевая переменная категориальная или для регрессии можно разбить на бины
+    # В данном случае просто разделим
+    data_train, data_test = train_test_split(data, test_size=0.2, random_state=42)
+    logger.info(f"Размер обучающей выборки (DataFrame): {data_train.shape}")
+    logger.info(f"Размер тестовой выборки (DataFrame): {data_test.shape}")
 
-    model = Model(data_train)
-    model.train(data_train)
-    y_pred = model.predict(data_test)
-    for i in range(10):
-        print(y_test.iloc[i], y_pred[i])
+    model = Model(None, is_load_model=False) # Инициализируем без данных, т.к. train сам подготовит
+    model.train(data_train) # Передаем обучающий DataFrame
+    
+    # Или используем существующий экземпляр
+    # Передаем тестовый DataFrame без целевой колонки
+    start_time = time.time()
+    y_pred = model.predict(data_test.drop(target_column_name, axis=1)) 
+    end_time = time.time()
+    logger.info(f"Время предсказания: {(end_time - start_time):.10f} секунд для {len(y_pred)} записей")
+
+    # Сравнение первых 10 предсказаний
+    y_test_values = data_test[target_column_name] # Получаем y_test из data_test
+    logger.info("\nСравнение первых 10 реальных и предсказанных значений:")
+    for i in range(min(10, len(y_test_values))):
+        print(f"Реальное: {y_test_values.iloc[i]:.4f}, Предсказанное: {y_pred[i]:.4f}")
+        
     # Вычисляем RMSE (корень из среднеквадратичной ошибки)
-    rmse_value = np.sqrt(mean_squared_error(y_test, y_pred))
-    print(f"RMSE: {rmse_value:.4f}")
+    rmse_value = np.sqrt(mean_squared_error(y_test_values, y_pred))
+    print(f"\nИтоговый RMSE на тестовых данных: {rmse_value:.4f}")

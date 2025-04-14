@@ -13,3 +13,4 @@ test.ipynb
 **build/Release
 
 frontend/node_modules
+report*.txt
