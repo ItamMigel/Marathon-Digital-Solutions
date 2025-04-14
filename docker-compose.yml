@@ -1,0 +1,41 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      # Монтируем код для hot-reload, node_modules оставляем в контейнере
+      - ./frontend:/app/frontend
+      - /app/frontend/node_modules
+    # Переменная окружения для Vite, чтобы он слушал все интерфейсы
+    environment:
+      - HOST=0.0.0.0
+    # Добавляем зависимость от backend, чтобы frontend стартовал после backend
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      # Контекст сборки - корень проекта
+      context: .
+      # Указываем имя Dockerfile для backend
+      dockerfile: Dockerfile.backend
+    ports:
+      # Пробрасываем порт (убедись, что backend действительно слушает 8000)
+      - "8000:8000"
+    volumes:
+      # Монтируем код backend для разработки
+      - ./backend:/app/backend
+    # Можно добавить переменные окружения для backend, если нужно
+    # environment:
+    #   - DB_HOST=database
+    #   - SECRET_KEY=your_secret_key
+
+# Если нужна база данных или другие сервисы, их можно добавить сюда
+# volumes:
+#   postgres_data:
+
+# networks:
+#   app_network:
+#     driver: bridge 

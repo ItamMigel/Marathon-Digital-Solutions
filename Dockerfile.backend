@@ -1,0 +1,20 @@
+# Используем базовый образ Python 3.10
+FROM python:3.10-slim
+
+# Устанавливаем рабочую директорию
+WORKDIR /app
+
+# Копируем файл зависимостей
+COPY backend/requirements.txt /app/backend/requirements.txt
+
+# Устанавливаем зависимости Python из backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+
+# Копируем весь код backend в контейнер
+COPY backend/ /app/backend/
+
+# Открываем порт для backend (предположим 8000, измени если другой)
+EXPOSE 8000
+
+# Команда для запуска backend приложения из корня /app
+CMD ["python", "backend/run.py"] 
