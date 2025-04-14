@@ -284,7 +284,7 @@
 2. **Установить зависимости**
 
    ```bash
-   pip install -r requirements.txt
+   pip install -r backend/requirements.txt
    ```
 
    Бэкенд будет доступен по адресу: `http://localhost:8000/docs`
