@@ -14,8 +14,6 @@
 
 ### 1) EDA
 
-Okay, here is a summary of the data analysis performed in the `analys.md` notebook, suitable for your main `README.md`:
-
 ## Анализ данных и построение моделей
 
 В рамках проекта был проведен детальный анализ данных для понимания взаимосвязей между технологическими параметрами и предсказания целевой переменной `Гранулометрия %`.
