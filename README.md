@@ -90,7 +90,11 @@
 ```RMSE on validation set: 2.1357```
 
 - Featuretools - библиотека для автоматической генерации признаков(репозиторий библиотеки - https://github.com/alteryx/featuretools)
+
+    Результат:
+```RMSE on validation set: 2.5487```
 #### Эксперименты с отбором фичей
+
 - Shap - https://github.com/shap/shap
 
     Результат:
