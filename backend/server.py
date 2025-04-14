@@ -344,8 +344,16 @@ def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
             # Гранулометрия_процент - особый случай, добавляем даже если None
             if 'Гранулометрия_процент' in valid_columns:
                 if 'Гранулометрия_процент' not in data_dict:
-                    # Если значение отсутствует, используем случайное значение вместо 
-                    data_dict['Гранулометрия_процент'] = neyronka.predict(pd.DataFrame([data_dict]))
+                    # Если значение отсутствует, используем случайное значение вместо
+                    new_field_mapping = dict()
+                    for key in field_mapping.keys():
+                        new_field_mapping[field_mapping[key]] = key
+
+                    ddata = dict()
+                    for key in data_dict.keys():
+                        ddata[new_field_mapping[key]] = data_dict[key]
+                    print(pd.DataFrame([ddata]))
+                    data_dict['Гранулометрия_процент'] = neyronka.predict(pd.DataFrame([ddata]))
                     print(f"DB ADD: Добавляем новую гранулометрию в словарь: {data_dict['Гранулометрия_процент']}")
                 else:
                     # Явное преобразование к float для обеспечения правильного типа
