@@ -13,6 +13,12 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 # Копируем весь код backend в контейнер
 COPY backend/ /app/backend/
 
+# Копируем файлы модели и данных
+COPY model.pkl /app/model.pkl
+COPY scaler.pkl /app/scaler.pkl
+COPY features.json /app/features.json
+COPY top_features.json /app/top_features.json
+
 # Открываем порт для backend (предположим 8000, измени если другой)
 EXPOSE 8000
 
