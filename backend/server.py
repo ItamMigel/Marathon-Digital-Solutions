@@ -27,7 +27,9 @@ import json
 
 
 # Нейронка
-from model.main import Model
+from model.main import Model, create_advanced_features
+
+neyronka = Model(None, is_load_model=True)
 
 # --- Конфигурация и Логгирование ---
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename='server.log', encoding='utf-8', filemode='a')
@@ -342,11 +344,9 @@ def add_dataframe_to_db(db: Session, df: pd.DataFrame, area_name: str):
             # Гранулометрия_процент - особый случай, добавляем даже если None
             if 'Гранулометрия_процент' in valid_columns:
                 if 'Гранулометрия_процент' not in data_dict:
-                    # Если значение отсутствует, используем случайное значение вместо 0
-                    e = Model()
-                    random_val = e.get_granulometry()
-                    data_dict['Гранулометрия_процент'] = random_val
-                    print(f"DB ADD: Добавляем новую случайную гранулометрию в словарь: {random_val}")
+                    # Если значение отсутствует, используем случайное значение вместо 
+                    data_dict['Гранулометрия_процент'] = neyronka.predict(pd.DataFrame([data_dict]))
+                    print(f"DB ADD: Добавляем новую гранулометрию в словарь: {data_dict['Гранулометрия_процент']}")
                 else:
                     # Явное преобразование к float для обеспечения правильного типа
                     original = data_dict['Гранулометрия_процент']
@@ -524,12 +524,7 @@ def get_lines_summary(db: Session = Depends(get_db_session)):
             df_new = read_new_csv_records(line.file_path, line.last_update)
             if df_new is not None:
                 logger.info(f"Добавляем столбец 'Гранулометрия_процент' для {line.area_name}")
-                e = Model()
-                random_values = []
-                for i in range(len(df_new)):
-                    random_val = e.get_granulometry()
-                    random_values.append(random_val)
-                df_new['Гранулометрия_процент'] = random_values
+                df_new['Гранулометрия_процент'] = neyronka.predict(df_new)
                 granulo_values = df_new['Гранулометрия_процент'].head().tolist()
                 print(f"BEFORE DB: Пример значений гранулометрии: {granulo_values}")
                 logger.info(f"BEFORE DB: Пример значений гранулометрии: {granulo_values}")
