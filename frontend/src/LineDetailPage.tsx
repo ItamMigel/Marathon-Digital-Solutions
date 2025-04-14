@@ -114,6 +114,13 @@ function LineDetailPage() {
     }
   };
 
+  // Новый обработчик для перехода на конкретную страницу
+  const handlePageChange = (pageNumber: number) => {
+    if (pageNumber >= 1 && pageNumber <= (lineData?.pagination.total_pages ?? 1)) {
+       fetchLineData(pageNumber);
+    }
+  };
+
   // Определяем иконку и цвет статуса (аналогично App.tsx)
   let StatusIcon = IconQuestion;
   let statusColorClass = 'text-gray-500';
@@ -227,8 +234,8 @@ function LineDetailPage() {
                             Страница {lineData.pagination.page} из {lineData.pagination.total_pages}
                             (Всего: {lineData.pagination.total_items} записей)
                         </span>
-                        {/* Кнопки навигации */}
-                        <div className="space-x-2">
+                        {/* Кнопки навигации с номерами страниц */}
+                        <div className="flex items-center space-x-1">
                             <button
                                 onClick={handlePrevPage}
                                 disabled={lineData.pagination.page <= 1 || isLoading}
@@ -236,6 +243,58 @@ function LineDetailPage() {
                             >
                                 Назад
                             </button>
+                            {(() => {
+                                const buttons = [];
+                                const currentPage = lineData.pagination.page;
+                                const totalPages = lineData.pagination.total_pages;
+                                const pageNeighbours = 1; // Сколько страниц показывать слева/справа от текущей
+
+                                // Функция для добавления кнопки страницы
+                                const addPageButton = (page: number) => {
+                                    buttons.push(
+                                        <button
+                                            key={`page-${page}`}
+                                            onClick={() => handlePageChange(page)}
+                                            disabled={isLoading}
+                                            className={`px-3 py-1 border rounded-md ${
+                                                page === currentPage 
+                                                ? 'bg-indigo-600 text-white border-indigo-600' 
+                                                : 'bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed'
+                                            }`}
+                                        >
+                                            {page}
+                                        </button>
+                                    );
+                                };
+
+                                // Всегда добавляем первую страницу
+                                addPageButton(1);
+
+                                // Добавляем многоточие, если нужно (слева)
+                                if (currentPage > pageNeighbours + 2) {
+                                    buttons.push(<span key="ellipsis-start" className="px-2 py-1">...</span>);
+                                }
+
+                                // Добавляем страницы вокруг текущей
+                                const startPage = Math.max(2, currentPage - pageNeighbours);
+                                const endPage = Math.min(totalPages - 1, currentPage + pageNeighbours);
+
+                                for (let i = startPage; i <= endPage; i++) {
+                                    addPageButton(i);
+                                }
+
+                                // Добавляем многоточие, если нужно (справа)
+                                if (currentPage < totalPages - pageNeighbours - 1) {
+                                    buttons.push(<span key="ellipsis-end" className="px-2 py-1">...</span>);
+                                }
+
+                                // Всегда добавляем последнюю страницу (если она не 1)
+                                if (totalPages > 1) {
+                                    addPageButton(totalPages);
+                                }
+
+                                return buttons;
+                            })()}
                             <button
                                 onClick={handleNextPage}
                                 disabled={lineData.pagination.page >= lineData.pagination.total_pages || isLoading}
